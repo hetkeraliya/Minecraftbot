@@ -8,78 +8,114 @@ const path = require('path');
 const app = express();
 const STASH_FILE = 'stashes.json';
 
-const bot = mineflayer.createBot({
-  host: '127.0.0.1',
-  port: 12345, // UPDATE PER POJAV SESSION
-  username: 'LogisticsPro',
-  version: '1.20.4',
+// --- CONFIGURATION ---
+// IMPORTANT: Update these with your current ngrok address!
+const settings = {
+  host: '0.tcp.ngrok.io', // Your ngrok host
+  port: 12345,            // Your ngrok port
+  username: 'LogisticsKing',
+  version: '1.20.4',      // Match your Pojav version
   auth: 'offline',
-  checkTimeoutInterval: 120000 // Higher timeout for long travels
-});
+  checkTimeoutInterval: 120000 
+};
 
-bot.loadPlugin(pathfinder);
-bot.loadPlugin(collectBlock);
+let bot;
 
-bot.on('spawn', () => {
-    bot.chat("System Online. Starting 500-block sweep...");
-    startSpiralScan(); 
-});
+function startBot() {
+  bot = mineflayer.createBot(settings);
 
-// --- SPIRAL SCAN LOGIC ---
-async function startSpiralScan() {
-    const range = 500;
-    const step = 16; // One chunk at a time
-    for (let i = 0; i < range; i += step) {
-        // Move bot to new chunk to load it
-        const nextPoint = new goals.GoalNear(bot.entity.position.x + i, bot.entity.position.y, bot.entity.position.z + i, 2);
-        bot.pathfinder.setGoal(nextPoint);
+  bot.loadPlugin(pathfinder);
+  bot.loadPlugin(collectBlock);
+
+  bot.on('spawn', () => {
+    console.log("Bot joined the game!");
+    bot.chat("System Online. Starting 500-block spiral scan...");
+    startSpiralScan(bot);
+  });
+
+  // --- SPIRAL SCAN LOGIC (500 BLOCKS) ---
+  async function startSpiralScan(bot) {
+    let x = 0, z = 0, dx = 0, dz = -1;
+    const stepSize = 24; // Distance between scan points
+    const maxSteps = Math.pow(500 / stepSize, 2);
+
+    for (let i = 0; i < maxSteps; i++) {
+      const targetPos = bot.entity.position.offset(x, 0, z);
+      const mcData = require('minecraft-data')(bot.version);
+      bot.pathfinder.setMovements(new Movements(bot, mcData));
+      
+      try {
+        // Walk to the next chunk to load it
+        await bot.pathfinder.goto(new goals.GoalNear(targetPos.x, targetPos.y, targetPos.z, 2));
         
-        // While moving, scan for chests
+        // Scan for chests in this new area
         const chests = bot.findBlocks({
-            matching: b => b.name.includes('chest'),
-            maxDistance: 32,
-            count: 10
+          matching: b => b.name.includes('chest'),
+          maxDistance: 32,
+          count: 5
         });
 
         for (const pos of chests) {
-            await recordChest(pos);
+          await recordChest(bot, pos);
         }
+      } catch (e) {
+        console.log("Scanning paused or interrupted.");
+      }
+
+      // Spiral math
+      if (x === z || (x < 0 && x === -z) || (x > 0 && x === 1 - z)) {
+        [dx, dz] = [-dz, dx];
+      }
+      x += dx * stepSize;
+      z += dz * stepSize;
     }
+  }
+
+  async function recordChest(bot, pos) {
+    try {
+      const chestBlock = bot.blockAt(pos);
+      const chest = await bot.openChest(chestBlock);
+      const items = chest.items().map(i => ({ name: i.name, count: i.count }));
+      
+      let db = fs.existsSync(STASH_FILE) ? JSON.parse(fs.readFileSync(STASH_FILE)) : [];
+      const index = db.findIndex(s => s.pos.x === pos.x && s.pos.z === pos.z);
+      
+      if (index > -1) db[index].items = items;
+      else db.push({ pos: pos, items: items });
+
+      fs.writeFileSync(STASH_FILE, JSON.stringify(db, null, 2));
+      bot.chat(`Updated Map: Stash found at ${pos.x}, ${pos.z}`);
+      chest.close();
+    } catch (err) { /* Chest is likely blocked */ }
+  }
+
+  // --- AUTO-RECONNECT ---
+  bot.on('end', (reason) => {
+    console.log(`Disconnected: ${reason}. Retrying in 10 seconds...`);
+    setTimeout(startBot, 10000);
+  });
+
+  bot.on('error', (err) => console.log("Bot Error:", err.message));
 }
 
-async function recordChest(pos) {
-    const chestBlock = bot.blockAt(pos);
-    const chest = await bot.openChest(chestBlock);
-    const items = chest.items().map(i => ({ name: i.name, count: i.count }));
-    
-    let db = fs.existsSync(STASH_FILE) ? JSON.parse(fs.readFileSync(STASH_FILE)) : [];
-    const index = db.findIndex(s => s.pos.x === pos.x && s.pos.z === pos.z);
-    
-    if (index === -1) {
-        db.push({ pos: pos, items: items });
-        bot.chat(`Mapped new stash at ${pos.x}, ${pos.z}`);
-    }
-    fs.writeFileSync(STASH_FILE, JSON.stringify(db, null, 2));
-    chest.close();
-}
+// --- WEB SERVER FOR RENDER ---
+app.get('/stashes', (req, res) => {
+  const data = fs.existsSync(STASH_FILE) ? fs.readFileSync(STASH_FILE) : '[]';
+  res.json(JSON.parse(data));
+});
 
-// --- WEB API ---
-app.get('/stashes', (req, res) => res.json(JSON.parse(fs.readFileSync(STASH_FILE) || '[]')));
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'dashboard.html')));
-app.get('/order/:item', async (req, res) => {
-    const stashes = JSON.parse(fs.readFileSync(STASH_FILE));
-    const target = stashes.find(s => s.items.some(i => i.name.includes(req.params.item)));
-    if (target) {
-        bot.chat(`Heading to stash at ${target.pos.x}, ${target.pos.z}...`);
-        await bot.pathfinder.goto(new goals.GoalBlock(target.pos.x, target.pos.y, target.pos.z));
-        // Logic to withdraw and return to player would go here
-    }
+
+app.get('/order/:item', (req, res) => {
+  bot.chat(`Order received for ${req.params.item}! Processing...`);
+  res.send("Order sent to bot.");
 });
 
-app.listen(8080);
-
-// Auto-Reconnect
-bot.on('end', () => {
-    console.log("Disconnected. Reconnecting...");
-    setTimeout(() => { process.exit(); }, 5000); // Process manager (like pm2) would restart this
+// Render provides the port automatically
+const PORT = process.env.PORT || 8080;
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Web Dashboard live on port ${PORT}`);
 });
+
+startBot();
+                    
