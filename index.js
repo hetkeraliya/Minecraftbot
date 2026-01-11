@@ -11,13 +11,13 @@ const STASH_FILE = 'stashes.json';
 // --- CONFIGURATION ---
 // IMPORTANT: Update these with your current ngrok address!
 const settings = {
-  host: '0.tcp.ngrok.io', // Your ngrok host
-  port: 12345,            // Your ngrok port
-  username: 'LogisticsKing',
-  version: '1.20.4',      // Match your Pojav version
-  auth: 'offline',
-  checkTimeoutInterval: 120000 
+  host: 'hetkeraliya.falixsrv.me', // Your server IP
+  port: 12345,              // Your server port
+  username: 'LogisticsBot',
+  version: '1.20.4',        // Must match your server version
+  auth: 'offline'           // Essential for free servers
 };
+
 
 let bot;
 
@@ -119,3 +119,4 @@ app.listen(PORT, '0.0.0.0', () => {
 
 startBot();
                     
+
