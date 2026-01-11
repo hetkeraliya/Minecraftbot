@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Stash Logistics Pro</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; background: #0f0f0f; color: #e0e0e0; margin: 0; padding: 20px; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 20px; }
+        .card { background: #1a1a1a; border: 1px solid #333; border-radius: 12px; padding: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
+        .item-row { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid #222; font-size: 0.9em; }
+        .coords { color: #4CAF50; font-family: monospace; font-size: 0.8em; }
+        button { background: #2e7d32; color: white; border: none; padding: 8px 12px; border-radius: 6px; cursor: pointer; width: 100%; margin-top: 10px; }
+        button:hover { background: #388e3c; }
+        .header { text-align: center; padding-bottom: 30px; }
+        input { width: 100%; padding: 10px; border-radius: 8px; border: 1px solid #333; background: #222; color: white; margin-bottom: 20px; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1> Global Stash Network</h1>
+        <input type="text" id="search" placeholder="Search for items (e.g. Diamond)..." onkeyup="filterItems()">
+    </div>
+    <div class="grid" id="container"></div>
+
+    <script>
+        async function updateUI() {
+            const res = await fetch('/stashes');
+            const data = await res.json();
+            const container = document.getElementById('container');
+            container.innerHTML = data.map(stash => `
+                <div class="card">
+                    <div class="coords">X: ${stash.pos.x}, Y: ${stash.pos.y}, Z: ${stash.pos.z}</div>
+                    <div class="items">
+                        ${stash.items.map(i => `
+                            <div class="item-row">
+                                <span>${i.name.replace(/_/g, ' ')}</span>
+                                <b>x${i.count}</b>
+                            </div>
+                            <button onclick="order('${i.name}')">Deliver ${i.name}</button>
+                        `).join('')}
+                    </div>
+                </div>
+            `).join('');
+        }
+        async function order(name) {
+            alert("Bot is traveling to collect " + name);
+            fetch('/order/' + name);
+        }
+        setInterval(updateUI, 5000);
+        updateUI();
+    </script>
+</body>
+</html>
