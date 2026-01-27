@@ -1,13 +1,17 @@
 {
-  "name": "mc-logistics-bot",
+  "name": "stashbot",
   "version": "1.0.0",
-  "scripts": { "start": "node index.js" },
+  "description": "Logistics Bot",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
   "dependencies": {
     "mineflayer": "^4.20.0",
     "mineflayer-pathfinder": "^2.4.0",
-    "mineflayer-collectblock": "^1.2.0",
-    "express": "^4.18.0",
-    "minecraft-data": "^3.0.0"
+    "vec3": "^0.1.8",
+    "express": "^4.18.2",
+    "body-parser": "^1.20.2",
+    "minecraft-data": "^3.71.0"
   }
 }
-
