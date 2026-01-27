@@ -180,6 +180,9 @@ app.get('/', (req, res) => {
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(\`Dashboard running on port \${PORT}\`));
+// Use standard single quotes to avoid backtick syntax errors on mobile copy-paste
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, function() {
+    console.log('Dashboard running on port ' + PORT);
+});
 createBot();
-                                                                   
