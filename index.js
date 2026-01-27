@@ -7,8 +7,8 @@ const bodyParser = require('body-parser');
 
 const STASH_FILE = 'stashes.json';
 const SETTINGS = {
-    host: 'YOUR_ATERNOS_IP.aternos.me', 
-    port: 25565,                         
+    host: '144.76.90.156:4338', 
+    port: 4337,                         
     username: 'LogisticsKing',
     version: '1.21.5',
     auth: 'offline',
@@ -138,3 +138,4 @@ app.listen(RENDER_PORT, function() {
 });
 createBot();
                     
+
