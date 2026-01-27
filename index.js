@@ -7,8 +7,8 @@ const bodyParser = require('body-parser');
 
 const STASH_FILE = 'stashes.json';
 const SETTINGS = {
-    host: 'YOUR_ATERNOS_IP.aternos.me', // <--- Put your Aternos IP here
-    port: 25565,                         // <--- Aternos default is usually 25565
+    host: 'YOUR_ATERNOS_IP.aternos.me', 
+    port: 25565,                         
     username: 'LogisticsKing',
     version: '1.21.5',
     auth: 'offline',
@@ -19,7 +19,6 @@ const app = express();
 app.use(bodyParser.json());
 let bot;
 
-// --- Database Helper ---
 const getDB = () => {
     try {
         if (!fs.existsSync(STASH_FILE)) return [];
@@ -33,10 +32,10 @@ function createBot() {
     bot = mineflayer.createBot(SETTINGS);
     bot.loadPlugin(pathfinder);
 
-    bot.on('login', () => console.log("📡 Connected to Aternos!"));
+    bot.on('login', () => console.log('📡 Connected to Aternos!'));
     
     bot.on('spawn', () => {
-        console.log("✅ Logistics King Spawned");
+        console.log('✅ Logistics King Spawned');
         setTimeout(() => {
             const mcData = require('minecraft-data')(bot.version);
             const movements = new Movements(bot, mcData);
@@ -46,17 +45,16 @@ function createBot() {
         }, 2000);
     });
 
-    // --- AUTOMATED WAREHOUSE LOGIC ---
     app.post('/order', async (req, res) => {
         const { itemName, count, x, y, z } = req.body;
-        res.json({ status: "Dispatched" });
+        res.json({ status: 'Dispatched' });
         const db = getDB();
         let gathered = 0;
         const targetCount = parseInt(count);
 
         // 1. Find Shulker in Chests
         let shulkerStash = db.find(s => s.items.some(i => i.name.includes('shulker_box')));
-        if (!shulkerStash) return bot.chat("Error: No shulker boxes in stashes!");
+        if (!shulkerStash) return bot.chat('Error: No shulker boxes found in stashes!');
 
         const sPos = new Vec3(shulkerStash.pos.x, shulkerStash.pos.y, shulkerStash.pos.z);
         await bot.pathfinder.goto(new goals.GoalGetToBlock(sPos.x, sPos.y, sPos.z));
@@ -82,7 +80,6 @@ function createBot() {
             }
         }
 
-        // 3. Warehouse Packing
         bot.pathfinder.setGoal(null); 
         const ground = bot.entity.position.offset(1, -1, 0).floored();
         const boxPos = bot.entity.position.offset(1, 0, 0).floored();
@@ -106,23 +103,21 @@ function createBot() {
         await bot.dig(bot.blockAt(boxPos));
         await bot.waitForTicks(30);
 
-        // 4. Delivery
         const deliverVec = new Vec3(parseInt(x), parseInt(y), parseInt(z));
         await bot.pathfinder.goto(new goals.GoalNear(deliverVec.x, deliverVec.y, deliverVec.z, 2));
         
         const fullShulker = bot.inventory.items().find(i => i.name.includes('shulker_box') && i.nbt);
         if (fullShulker) await bot.tossStack(fullShulker);
-        bot.chat(`Delivered ${gathered}x \${itemName}`);
+        bot.chat('Delivered ' + gathered + 'x ' + itemName);
     });
 
-    bot.on('error', (err) => console.log("Bot Error:", err));
+    bot.on('error', (err) => console.log('Bot Error:', err));
     bot.on('end', () => {
-        console.log("Disconnected. Reconnecting in 10s...");
+        console.log('Disconnected. Reconnecting in 10s...');
         setTimeout(createBot, 10000);
     });
 }
 
-// --- RED/BLACK TILED UI ---
 app.get('/stashes', (req, res) => {
     const db = getDB();
     const totals = {};
@@ -133,56 +128,13 @@ app.get('/stashes', (req, res) => {
 });
 
 app.get('/', (req, res) => {
-    res.send(`
-    <html>
-    <head>
-        <style>
-            body { background: #000; color: #ff0000; font-family: monospace; padding: 20px; }
-            .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; }
-            .tile { border: 1px solid #ff0000; padding: 15px; text-align: center; border-radius: 5px; }
-            input { background: #111; border: 1px solid #ff0000; color: #fff; width: 60px; margin-bottom: 5px; }
-            button { background: #ff0000; color: #000; border: none; padding: 5px; cursor: pointer; width: 100%; font-weight: bold; }
-        </style>
-    </head>
-    <body>
-        <h1 style="text-align:center;">WAREHOUSE COMMAND</h1>
-        <div class="grid" id="grid"></div>
-        <script>
-            async function load() {
-                const data = await (await fetch('/stashes')).json();
-                const grid = document.getElementById('grid');
-                grid.innerHTML = '';
-                for (const [name, count] of Object.entries(data)) {
-                    grid.innerHTML += \`<div class="tile">
-                        <b>\${name.replace(/_/g, ' ')}</b>
-                        <p>STK: \${count}</p>
-                        <input type="number" id="qty-\${name}" value="64">
-                        <button onclick="order('\${name}')">FETCH</button>
-                    </div>\`;
-                }
-            }
-            function order(name) {
-                const qty = document.getElementById('qty-'+name).value;
-                const coords = prompt("COORDS X Y Z:");
-                if (!coords) return;
-                const p = coords.split(' ');
-                fetch('/order', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({itemName: name, count: qty, x: p[0], y: p[1], z: p[2]})
-                });
-            }
-            load();
-            setInterval(load, 10000);
-        </script>
-    </body>
-    </html>`);
+    res.send('<html><body style="background:#000;color:#ff0000;font-family:monospace;padding:20px;"><h1 style="text-align:center;">WAREHOUSE COMMAND</h1><div id="grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;"></div><script>async function load(){const data=await(await fetch("/stashes")).json();const grid=document.getElementById("grid");grid.innerHTML="";for(const[name,count]of Object.entries(data)){grid.innerHTML+=\'<div style="border:1px solid #ff0000;padding:15px;text-align:center;border-radius:5px;"><b>\'+name.replace(/_/g," ")+\'</b><p>STK: \'+count+\'</p><input type="number" id="qty-\'+name+\'" value="64" style="background:#111;border:1px solid #ff0000;color:#fff;width:60px;margin-bottom:5px;"><button onclick="order(\\\'\'+name+\'\\\')" style="background:#ff0000;color:#000;border:none;padding:5px;cursor:pointer;width:100%;font-weight:bold;">FETCH</button></div>\'}}function order(name){const qty=document.getElementById("qty-"+name).value;const coords=prompt("COORDS X Y Z:");if(!coords)return;const p=coords.split(" ");fetch("/order",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({itemName:name,count:qty,x:p[0],y:p[1],z:p[2]})})}load();setInterval(load,10000);</script></body></html>');
 });
 
-const PORT = process.env.PORT || 10000;
-// Use standard single quotes to avoid backtick syntax errors on mobile copy-paste
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, function() {
-    console.log('Dashboard running on port ' + PORT);
+// DEFINED ONCE HERE
+const RENDER_PORT = process.env.PORT || 10000;
+app.listen(RENDER_PORT, function() {
+    console.log('Dashboard running on port ' + RENDER_PORT);
 });
 createBot();
+                    
