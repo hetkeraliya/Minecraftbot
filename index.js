@@ -16,9 +16,9 @@ const STASH_FILE = 'stashes.json';
 
 const SETTINGS = {
 
-    host: 'htttkkff.exaroton.me', 
+    host: 'Bottest-wIQk.aternos.me', 
 
-    port: 45975,                         
+    port: 25565,                         
 
     username: 'LogisticsKing',
 
@@ -285,3 +285,4 @@ createBot();
 
 
                 
+
