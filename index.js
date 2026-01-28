@@ -7,7 +7,7 @@ const bodyParser = require('body-parser');
 
 const STASH_FILE = 'stashes.json';
 const SETTINGS = {
-    host: 'htttkkff.exaroton.me:45975', 
+    host: 'htttkkff.exaroton.me', 
     port: 45975,                         
     username: 'LogisticsKing',
     version: '1.21.5',
@@ -138,6 +138,7 @@ app.listen(RENDER_PORT, function() {
 });
 createBot();
                     
+
 
 
 
