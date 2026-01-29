@@ -5,12 +5,13 @@ const fs = require('fs');
 const express = require('express');
 const bodyParser = require('body-parser');
 
+// --- CONFIGURATION ---
 const STASH_FILE = 'stashes.json';
 const SETTINGS = {
     host: 'Bottest-wIQk.aternos.me', 
     port: 25565,              
     username: 'LogisticsKing',
-    version: '1.21.5',
+    version: '1.21.1',
     auth: 'offline',
     checkTimeoutInterval: 120000 
 };
@@ -20,6 +21,11 @@ app.use(bodyParser.json());
 let bot;
 
 const wait = (ms) => new Promise(res => setTimeout(res, ms));
+
+// Force coordinates to be plain numbers to avoid "floor is not a function"
+const toVec = (pos) => {
+    return new Vec3(Number(pos.x), Number(pos.y), Number(pos.z));
+};
 
 const getDB = () => {
     try {
@@ -36,41 +42,33 @@ function createBot() {
     bot.loadPlugin(pathfinder);
 
     bot.on('error', (err) => console.log('📡 Network: ' + err.code));
-    bot.on('kicked', (reason) => console.log('🚫 Kicked: ' + reason));
-
     bot.on('spawn', () => {
-        console.log('✅ Logistics King Online');
+        console.log('✅ Logistics System Online');
         const mcData = require('minecraft-data')(bot.version);
         const movements = new Movements(bot, mcData);
-        movements.canDig = true;           
-        movements.canPlaceOn = true;      
         bot.pathfinder.setMovements(movements);
     });
 
-    // --- AGGRESSIVE SCANNER ---
     bot.on('chat', async (username, message) => {
         if (username === bot.username) return;
         if (message === '!scan') {
             bot.chat('🔍 Scanning warehouse...');
             const containers = bot.findBlocks({
                 matching: b => ['chest', 'shulker_box', 'barrel', 'trapped_chest'].some(n => b.name.includes(n)),
-                maxDistance: 64, count: 100
+                maxDistance: 64, count: 50
             });
-
-            if (containers.length === 0) return bot.chat('❌ No chests found!');
-            
             let db = [];
             for (const pos of containers) {
                 try {
-                    await bot.pathfinder.goto(new goals.GoalGetToBlock(pos.x, pos.y, pos.z));
-                    await wait(800); // Higher delay for Aternos lag
-                    const container = await bot.openContainer(bot.blockAt(pos));
-                    const items = container.containerItems().map(i => ({ name: i.name, count: i.count }));
-                    db.push({ pos, items });
+                    const target = toVec(pos);
+                    await bot.pathfinder.goto(new goals.GoalGetToBlock(target.x, target.y, target.z));
+                    await wait(800);
+                    const container = await bot.openContainer(bot.blockAt(target));
+                    db.push({ pos: {x: target.x, y: target.y, z: target.z}, items: container.containerItems().map(i => ({ name: i.name, count: i.count })) });
                     saveDB(db);
                     container.close();
                     await wait(400);
-                } catch (e) { console.log('Skipped: ' + pos); }
+                } catch (e) { console.log('Scan skip:', e.message); }
             }
             bot.chat('✅ Scan Complete.');
         }
@@ -79,35 +77,38 @@ function createBot() {
     bot.on('end', () => setTimeout(createBot, 10000));
 }
 
-// --- REFINED ORDER LOGIC ---
+// --- REPAIRED ORDER LOGIC ---
 app.post('/order', async (req, res) => {
     const { itemName, count, x, y, z, targetPlayer } = req.body;
     res.json({ status: 'Dispatched' });
 
     try {
         const db = getDB();
-        bot.chat('📦 Processing ' + itemName + ' for ' + (targetPlayer || 'coords'));
+        bot.chat('📦 Processing order...');
 
         // 1. Fetch Shulker
         let shulkerStash = db.find(s => s.items.some(i => i.name.includes('shulker_box')));
-        if (!shulkerStash) return bot.chat('❌ Error: No shulkers found!');
+        if (!shulkerStash) return bot.chat('❌ No shulkers!');
 
-        await bot.pathfinder.goto(new goals.GoalGetToBlock(shulkerStash.pos.x, shulkerStash.pos.y, shulkerStash.pos.z));
-        const sContainer = await bot.openContainer(bot.blockAt(shulkerStash.pos));
+        const sVec = toVec(shulkerStash.pos);
+        await bot.pathfinder.goto(new goals.GoalGetToBlock(sVec.x, sVec.y, sVec.z));
+        const sContainer = await bot.openContainer(bot.blockAt(sVec));
         const sItem = sContainer.containerItems().find(i => i.name.includes('shulker_box'));
         await sContainer.withdraw(sItem.type, null, 1);
         sContainer.close();
-        await wait(1500);
+        await wait(1000);
 
         // 2. Gather Items
         let gathered = 0;
+        const targetQty = Number(count) || 64;
         for (const stash of db) {
-            if (gathered >= count) break;
+            if (gathered >= targetQty) break;
             const match = stash.items.find(i => i.name === itemName);
             if (match) {
-                await bot.pathfinder.goto(new goals.GoalGetToBlock(stash.pos.x, stash.pos.y, stash.pos.z));
-                const c = await bot.openContainer(bot.blockAt(stash.pos));
-                const toTake = Math.min(count - gathered, match.count);
+                const itemVec = toVec(stash.pos);
+                await bot.pathfinder.goto(new goals.GoalGetToBlock(itemVec.x, itemVec.y, itemVec.z));
+                const c = await bot.openContainer(bot.blockAt(itemVec));
+                const toTake = Math.min(targetQty - gathered, match.count);
                 await c.withdraw(bot.registry.itemsByName[itemName].id, null, toTake);
                 gathered += toTake;
                 c.close();
@@ -115,68 +116,38 @@ app.post('/order', async (req, res) => {
             }
         }
 
-                // 3. PACKING (Stable Math Version)
+        // 3. PACKING (Manual Math to fix "floor" error)
         bot.pathfinder.setGoal(null);
         await wait(500);
 
-        // Get the bot's current position safely
-        const curPos = bot.entity.position;
-        
-        // Calculate ground and box position using standard Math
-        const groundPos = new Vec3(
-            Math.floor(curPos.x) + 1, 
-            Math.floor(curPos.y) - 1, 
-            Math.floor(curPos.z)
-        );
-        const boxPos = new Vec3(
-            Math.floor(curPos.x) + 1, 
-            Math.floor(curPos.y), 
-            Math.floor(curPos.z)
-        );
-
-        console.log(`📦 Placing shulker at: ${boxPos}`);
-
-        // Ensure the spot is clear
-        const blockInWay = bot.blockAt(boxPos);
-        if (blockInWay && blockInWay.name !== 'air') {
-            await bot.dig(blockInWay);
-            await wait(500);
-        }
+        const bx = Math.floor(bot.entity.position.x) + 1;
+        const by = Math.floor(bot.entity.position.y);
+        const bz = Math.floor(bot.entity.position.z);
+        const boxPos = new Vec3(bx, by, bz);
+        const groundPos = new Vec3(bx, by - 1, bz);
 
         const shulkerInInv = bot.inventory.items().find(i => i.name.includes('shulker_box'));
-        if (!shulkerInInv) throw new Error("Shulker lost during gathering");
-
         await bot.equip(shulkerInInv, 'hand');
         await wait(500);
-        
-        // Place the block against the ground block
         await bot.placeBlock(bot.blockAt(groundPos), new Vec3(0, 1, 0));
         await wait(1500);
         
         const box = await bot.openContainer(bot.blockAt(boxPos));
-        const itemsToPack = bot.inventory.items().filter(i => i.name === itemName);
-        for (const item of itemsToPack) {
+        for (const item of bot.inventory.items().filter(i => i.name === itemName)) {
             await box.deposit(item.type, null, item.count);
-            await wait(300);
+            await wait(200);
         }
         box.close();
         await wait(1000);
-
-        // Break the box to pick it up
         await bot.dig(bot.blockAt(boxPos));
         await wait(1500);
 
-
-        // 4. SMART DELIVERY (Dynamic Goal)
-        if (targetPlayer) {
-            const player = bot.players[targetPlayer]?.entity;
-            if (player) {
-                await bot.pathfinder.goto(new goals.GoalFollow(player, 2));
-            } else {
-                await bot.pathfinder.goto(new goals.GoalNear(x, y, z, 2));
-            }
+        // 4. DELIVERY
+        const dx = Number(x); const dy = Number(y); const dz = Number(z);
+        if (targetPlayer && bot.players[targetPlayer]?.entity) {
+            await bot.pathfinder.goto(new goals.GoalFollow(bot.players[targetPlayer].entity, 2));
         } else {
-            await bot.pathfinder.goto(new goals.GoalNear(x, y, z, 2));
+            await bot.pathfinder.goto(new goals.GoalNear(dx, dy, dz, 2));
         }
         
         bot.pathfinder.setGoal(null);
@@ -185,7 +156,10 @@ app.post('/order', async (req, res) => {
         if (packed) await bot.tossStack(packed);
         bot.chat('✅ Delivered.');
 
-    } catch (e) { bot.chat('⚠️ Error: ' + e.message); }
+    } catch (e) { 
+        console.log("Error:", e);
+        bot.chat('⚠️ Error: ' + e.message); 
+    }
 });
 
 // --- DASHBOARD API ---
@@ -210,7 +184,7 @@ app.get('/', (req, res) => {
     res.send(`<html><head><style>
         body { background: #000; color: #f00; font-family: monospace; padding: 20px; }
         .container { display: flex; gap: 20px; }
-        .panel { border: 1px solid #f00; padding: 15px; flex: 1; height: 70vh; overflow-y: scroll; }
+        .panel { border: 1px solid #f00; padding: 15px; flex: 1; height: 70vh; overflow-y: auto; }
         .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
         .tile { border: 1px solid #444; padding: 10px; text-align: center; cursor: pointer; }
         .tile.selected { border-color: #f00; background: #200; }
@@ -218,42 +192,40 @@ app.get('/', (req, res) => {
         .player-row.selected { background: #f00; color: #000; }
         button { background: #f00; color: #000; border: none; padding: 20px; width: 100%; font-weight: bold; margin-top: 20px; cursor: pointer; }
     </style></head><body>
-        <h1>🛰️ MASTER LOGISTICS KING</h1>
+        <h1>🛰️ LOGISTICS KING V3</h1>
         <div class="container">
-            <div class="panel"><h3>1. WAREHOUSE STOCK</h3><div class="grid" id="items"></div></div>
-            <div class="panel"><h3>2. ACTIVE PLAYERS</h3><div id="players"></div>
-            <br>MANUAL CORDS: <input id="custom" placeholder="X Y Z" style="width:100%"></div>
+            <div class="panel"><h3>WAREHOUSE</h3><div class="grid" id="items"></div></div>
+            <div class="panel"><h3>PLAYERS</h3><div id="players"></div>
+            <br>CUSTOM: <input id="custom" placeholder="X Y Z" style="width:100%"></div>
         </div>
-        <button onclick="send()">DISPATCH LOGISTICS</button>
+        <button onclick="send()">DISPATCH</button>
         <script>
-            let selI=null; let selP=null;
+            let sI=null; let sP=null;
             async function load() {
                 const items = await(await fetch('/stashes')).json();
                 const players = await(await fetch('/players')).json();
                 document.getElementById('items').innerHTML = Object.entries(items).map(([n,c]) => 
-                    \`<div class="tile \${selI==n?'selected':''}" onclick="selItem('\${n}')">\${n.replace(/_/g,' ').toUpperCase()}<br><b>\${c}</b></div>\`
+                    \`<div class="tile \${sI==n?'selected':''}" onclick="sItem('\${n}')">\${n.replace(/_/g,' ')}<br><b>\${c}</b></div>\`
                 ).join('');
                 document.getElementById('players').innerHTML = players.map(p => 
-                    \`<div class="player-row \${selP?.username==p.username?'selected':''}" onclick="selPlayer('\${p.username}',\${p.x},\${p.y},\${p.z})">👤 \${p.username} [\${p.x}, \${p.y}, \${p.z}]</div>\`
+                    \`<div class="player-row \${sP?.username==p.username?'selected':''}" onclick="sPlayer('\${p.username}',\${p.x},\${p.y},\${p.z})">👤 \${p.username}</div>\`
                 ).join('');
             }
-            function selItem(n){ selI=n; load(); }
-            function selPlayer(username,x,y,z){ selP={username,x,y,z}; load(); }
+            function sItem(n){ sI=n; load(); }
+            function sPlayer(u,x,y,z){ sP={username:u,x,y,z}; load(); }
             function send() {
-                let coords = selP ? {x:selP.x, y:selP.y, z:selP.z} : null;
-                const custom = document.getElementById('custom').value;
-                if(custom) { const c = custom.split(' '); coords = {x:c[0], y:c[1], z:c[2]}; }
-                if(!selI || !coords) return alert("Select Item + Target!");
+                let coords = sP ? {x:sP.x, y:sP.y, z:sP.z} : null;
+                const cBox = document.getElementById('custom').value;
+                if(cBox) { const c = cBox.split(' '); coords = {x:c[0], y:c[1], z:c[2]}; }
                 fetch('/order', { method:'POST', headers:{'Content-Type':'application/json'}, 
-                body: JSON.stringify({itemName:selI, count:64, ...coords, targetPlayer: selP?.username})});
-                alert("Order Sent!");
+                body: JSON.stringify({itemName:sI, count:64, ...coords, targetPlayer: sP?.username})});
+                alert("Dispatched!");
             }
             setInterval(load, 3000); load();
         </script></body></html>`);
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log('Logistics Terminal Live'));
+app.listen(PORT, () => console.log('Terminal Ready'));
 createBot();
-
-
+                                
