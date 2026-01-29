@@ -11,7 +11,7 @@ const SETTINGS = {
     host: 'Bottest-wIQk.aternos.me', 
     port: 25565,              
     username: 'LogisticsKing',
-    version: '1.21.1',
+    version: '1.21.5',
     auth: 'offline',
     checkTimeoutInterval: 120000 
 };
@@ -229,3 +229,4 @@ const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log('Terminal Ready'));
 createBot();
                                 
+
