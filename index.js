@@ -5,6 +5,7 @@ const fs = require('fs');
 const express = require('express');
 const bodyParser = require('body-parser');
 
+// --- CONFIGURATION ---
 const STASH_FILE = 'stashes.json';
 const SETTINGS = {
     host: 'Bottest-wIQk.aternos.me', 
@@ -42,24 +43,54 @@ function createBot() {
         bot.pathfinder.setMovements(movements);
     });
 
+    // --- AGGRESSIVE SCANNER (!scan) ---
+    bot.on('chat', async (username, message) => {
+        if (username === bot.username) return;
+        if (message === '!scan') {
+            bot.chat('🔍 Scanning warehouse (64 block radius)...');
+            const containers = bot.findBlocks({
+                matching: b => ['chest', 'shulker_box', 'barrel', 'trapped_chest'].some(n => b.name.includes(n)),
+                maxDistance: 64, count: 100
+            });
+
+            if (containers.length === 0) return bot.chat('❌ No chests found!');
+            
+            let db = [];
+            for (const pos of containers) {
+                try {
+                    const target = toVec(pos);
+                    await bot.pathfinder.goto(new goals.GoalGetToBlock(target.x, target.y, target.z));
+                    await wait(800);
+                    const container = await bot.openContainer(bot.blockAt(target));
+                    const items = container.containerItems().map(i => ({ name: i.name, count: i.count }));
+                    db.push({ pos: {x: target.x, y: target.y, z: target.z}, items });
+                    saveDB(db);
+                    container.close();
+                    await wait(300);
+                } catch (e) { console.log('Skipped chest at ' + pos); }
+            }
+            bot.chat('✅ Scan Complete. Dashboard updated.');
+        }
+    });
+
     bot.on('end', () => setTimeout(createBot, 10000));
 }
 
-// --- ORDER LOGIC WITH PACKING VERIFICATION ---
+// --- ORDER LOGIC WITH PACKING & AUTO-DEDUCTION ---
 app.post('/order', async (req, res) => {
     const { itemName, count, x, y, z } = req.body;
     const targetQty = parseInt(count) || 64;
     const dest = { x: Number(x), y: Number(y), z: Number(z) };
 
-    let db = getDB();
     res.json({ status: 'Dispatched' });
 
     try {
+        const db = getDB();
         bot.chat(`📦 Task: ${targetQty}x ${itemName}`);
 
         // 1. GATHER SHULKER
         let shulkerStash = db.find(s => s.items.some(i => i.name.includes('shulker_box')));
-        if (!shulkerStash) return bot.chat('❌ No shulkers found in stashes!');
+        if (!shulkerStash) return bot.chat('❌ Error: No shulker boxes found!');
         
         await bot.pathfinder.goto(new goals.GoalGetToBlock(shulkerStash.pos.x, shulkerStash.pos.y, shulkerStash.pos.z));
         const sContainer = await bot.openContainer(bot.blockAt(toVec(shulkerStash.pos)));
@@ -97,14 +128,9 @@ app.post('/order', async (req, res) => {
         const boxPos = new Vec3(bx, by, bz);
         const groundPos = new Vec3(bx, by - 1, bz);
 
-        // Clear space
-        if (bot.blockAt(boxPos).name !== 'air') await bot.dig(bot.blockAt(boxPos));
-
         const shulkerInv = bot.inventory.items().find(i => i.name.includes('shulker_box'));
         await bot.equip(shulkerInv, 'hand');
         await wait(500);
-        
-        // Place and Verify
         await bot.placeBlock(bot.blockAt(groundPos), new Vec3(0, 1, 0));
         await wait(1500);
 
@@ -117,37 +143,30 @@ app.post('/order', async (req, res) => {
             }
             box.close();
             await wait(1000);
-            await bot.dig(bot.blockAt(boxPos)); // Pick up the full shulker
+            await bot.dig(bot.blockAt(boxPos));
             await wait(1500);
-        } else {
-            bot.chat('⚠️ Packing failed (Block not placed). Dropping raw.');
         }
 
-        // 4. DELIVERY & DROP FIX
-        bot.chat(`🚚 Delivering to destination...`);
+        // 4. DELIVERY & SMART DROP
+        bot.chat(`🚚 Delivering to ${dest.x} ${dest.y} ${dest.z}`);
         await bot.pathfinder.goto(new goals.GoalNear(dest.x, dest.y, dest.z, 1));
         
         bot.pathfinder.setGoal(null);
         await wait(2000);
         
-        // Look down to ensure item drops at feet
+        // Final look down to drop at feet
         await bot.lookAt(new Vec3(dest.x, dest.y - 1, dest.z));
 
-        // Find the shulker that has NBT data (meaning it has items)
         const packed = bot.inventory.items().find(i => i.name.includes('shulker_box') && i.nbt);
-        
         if (packed) {
             await bot.tossStack(packed);
-            bot.chat('✅ Delivered: Full Shulker dropped.');
+            bot.chat('✅ Delivered: Shulker dropped.');
         } else {
-            bot.chat('📦 Dropping items raw...');
-            for (const i of bot.inventory.items().filter(i => i.name === itemName)) {
-                await bot.tossStack(i);
-                await wait(200);
-            }
+            for (const i of bot.inventory.items().filter(i => i.name === itemName)) await bot.tossStack(i);
+            bot.chat('📦 Delivered: Raw items dropped.');
         }
 
-        // UPDATE DATABASE: Deduct items from stashes.json after delivery
+        // UPDATE DATABASE: Deduct after delivery
         let finalDB = getDB();
         let deductLeft = targetQty;
         finalDB = finalDB.map(s => {
@@ -163,10 +182,7 @@ app.post('/order', async (req, res) => {
         });
         saveDB(finalDB);
 
-    } catch (e) { 
-        console.log(e);
-        bot.chat('⚠️ Logistics Error: ' + e.message); 
-    }
+    } catch (e) { bot.chat('⚠️ Error: ' + e.message); }
 });
 
 // --- DASHBOARD API ---
@@ -181,7 +197,7 @@ app.get('/stashes', (req, res) => {
 
 app.get('/', (req, res) => {
     res.send(`<html><body style="background:#000;color:#0f0;font-family:monospace;padding:20px;">
-        <h1>LOGISTICS TERMINAL v7.0</h1>
+        <h1>LOGISTICS TERMINAL v8.0</h1>
         <div id="items" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px;"></div>
         <hr style="border-color:#0f0;margin:20px 0;">
         <div style="max-width:400px;">
@@ -213,4 +229,4 @@ app.get('/', (req, res) => {
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log('Terminal Live'));
 createBot();
-                
+                                           
