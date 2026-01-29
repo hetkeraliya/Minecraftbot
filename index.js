@@ -20,13 +20,13 @@ const app = express();
 app.use(bodyParser.json());
 let bot;
 
+// Helper: Safety Wait
 const wait = (ms) => new Promise(res => setTimeout(res, ms));
 
-// Force coordinates to be plain numbers to avoid "floor is not a function"
-const toVec = (pos) => {
-    return new Vec3(Number(pos.x), Number(pos.y), Number(pos.z));
-};
+// Helper: Force clean Vec3 objects from raw data
+const toVec = (pos) => new Vec3(Number(pos.x), Number(pos.y), Number(pos.z));
 
+// Database: Load/Save stashes.json
 const getDB = () => {
     try {
         if (!fs.existsSync(STASH_FILE)) return [];
@@ -41,22 +41,30 @@ function createBot() {
     bot = mineflayer.createBot(SETTINGS);
     bot.loadPlugin(pathfinder);
 
-    bot.on('error', (err) => console.log('📡 Network: ' + err.code));
+    bot.on('error', (err) => console.log('📡 Network Alert: ' + err.code));
+    bot.on('kicked', (reason) => console.log('🚫 Kicked: ' + reason));
+
     bot.on('spawn', () => {
-        console.log('✅ Logistics System Online');
+        console.log('✅ Logistics King Online');
         const mcData = require('minecraft-data')(bot.version);
         const movements = new Movements(bot, mcData);
+        movements.canDig = true;           
+        movements.canPlaceOn = true;      
         bot.pathfinder.setMovements(movements);
     });
 
+    // --- AGGRESSIVE SCANNER (!scan) ---
     bot.on('chat', async (username, message) => {
         if (username === bot.username) return;
         if (message === '!scan') {
-            bot.chat('🔍 Scanning warehouse...');
+            bot.chat('🔍 Scanning warehouse (64 block radius)...');
             const containers = bot.findBlocks({
                 matching: b => ['chest', 'shulker_box', 'barrel', 'trapped_chest'].some(n => b.name.includes(n)),
-                maxDistance: 64, count: 50
+                maxDistance: 64, count: 100
             });
+
+            if (containers.length === 0) return bot.chat('❌ No chests found!');
+            
             let db = [];
             for (const pos of containers) {
                 try {
@@ -64,31 +72,35 @@ function createBot() {
                     await bot.pathfinder.goto(new goals.GoalGetToBlock(target.x, target.y, target.z));
                     await wait(800);
                     const container = await bot.openContainer(bot.blockAt(target));
-                    db.push({ pos: {x: target.x, y: target.y, z: target.z}, items: container.containerItems().map(i => ({ name: i.name, count: i.count })) });
+                    const items = container.containerItems().map(i => ({ name: i.name, count: i.count }));
+                    db.push({ pos: {x: target.x, y: target.y, z: target.z}, items });
                     saveDB(db);
                     container.close();
-                    await wait(400);
-                } catch (e) { console.log('Scan skip:', e.message); }
+                    await wait(300);
+                } catch (e) { console.log('Skipped chest at ' + pos); }
             }
-            bot.chat('✅ Scan Complete.');
+            bot.chat('✅ Scan Complete. Dashboard updated.');
         }
     });
 
     bot.on('end', () => setTimeout(createBot, 10000));
 }
 
-// --- REPAIRED ORDER LOGIC ---
+// --- ORDER & DELIVERY LOGIC ---
 app.post('/order', async (req, res) => {
-    const { itemName, count, x, y, z, targetPlayer } = req.body;
-    res.json({ status: 'Dispatched' });
+    const { itemName, count, x, y, z } = req.body;
+    const targetQty = parseInt(count) || 64;
+    const dest = { x: Number(x), y: Number(y), z: Number(z) };
+
+    res.json({ status: 'Dispatched', item: itemName, quantity: targetQty });
 
     try {
         const db = getDB();
-        bot.chat('📦 Processing order...');
+        bot.chat(`📦 Processing ${targetQty}x ${itemName}...`);
 
-        // 1. Fetch Shulker
+        // 1. Fetch Empty Shulker
         let shulkerStash = db.find(s => s.items.some(i => i.name.includes('shulker_box')));
-        if (!shulkerStash) return bot.chat('❌ No shulkers!');
+        if (!shulkerStash) return bot.chat('❌ Error: No shulker boxes found!');
 
         const sVec = toVec(shulkerStash.pos);
         await bot.pathfinder.goto(new goals.GoalGetToBlock(sVec.x, sVec.y, sVec.z));
@@ -100,7 +112,6 @@ app.post('/order', async (req, res) => {
 
         // 2. Gather Items
         let gathered = 0;
-        const targetQty = Number(count) || 64;
         for (const stash of db) {
             if (gathered >= targetQty) break;
             const match = stash.items.find(i => i.name === itemName);
@@ -116,7 +127,7 @@ app.post('/order', async (req, res) => {
             }
         }
 
-        // 3. PACKING (Manual Math to fix "floor" error)
+        // 3. Packing (Safe Math Version)
         bot.pathfinder.setGoal(null);
         await wait(500);
 
@@ -133,7 +144,8 @@ app.post('/order', async (req, res) => {
         await wait(1500);
         
         const box = await bot.openContainer(bot.blockAt(boxPos));
-        for (const item of bot.inventory.items().filter(i => i.name === itemName)) {
+        const itemsToPack = bot.inventory.items().filter(i => i.name === itemName);
+        for (const item of itemsToPack) {
             await box.deposit(item.type, null, item.count);
             await wait(200);
         }
@@ -142,13 +154,9 @@ app.post('/order', async (req, res) => {
         await bot.dig(bot.blockAt(boxPos));
         await wait(1500);
 
-        // 4. DELIVERY
-        const dx = Number(x); const dy = Number(y); const dz = Number(z);
-        if (targetPlayer && bot.players[targetPlayer]?.entity) {
-            await bot.pathfinder.goto(new goals.GoalFollow(bot.players[targetPlayer].entity, 2));
-        } else {
-            await bot.pathfinder.goto(new goals.GoalNear(dx, dy, dz, 2));
-        }
+        // 4. Delivery
+        bot.chat(`🚚 Delivering to ${dest.x} ${dest.y} ${dest.z}`);
+        await bot.pathfinder.goto(new goals.GoalNear(dest.x, dest.y, dest.z, 2));
         
         bot.pathfinder.setGoal(null);
         await wait(1500);
@@ -157,20 +165,12 @@ app.post('/order', async (req, res) => {
         bot.chat('✅ Delivered.');
 
     } catch (e) { 
-        console.log("Error:", e);
+        console.log(e);
         bot.chat('⚠️ Error: ' + e.message); 
     }
 });
 
 // --- DASHBOARD API ---
-app.get('/players', (req, res) => {
-    if (!bot || !bot.entities) return res.json([]);
-    const players = Object.values(bot.entities)
-        .filter(e => e.type === 'player' && e.username !== bot.username)
-        .map(p => ({ username: p.username, x: Math.floor(p.position.x), y: Math.floor(p.position.y), z: Math.floor(p.position.z) }));
-    res.json(players);
-});
-
 app.get('/stashes', (req, res) => {
     const db = getDB();
     const totals = {};
@@ -182,51 +182,43 @@ app.get('/stashes', (req, res) => {
 
 app.get('/', (req, res) => {
     res.send(`<html><head><style>
-        body { background: #000; color: #f00; font-family: monospace; padding: 20px; }
-        .container { display: flex; gap: 20px; }
-        .panel { border: 1px solid #f00; padding: 15px; flex: 1; height: 70vh; overflow-y: auto; }
+        body { background: #000; color: #0f0; font-family: monospace; padding: 20px; }
         .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
-        .tile { border: 1px solid #444; padding: 10px; text-align: center; cursor: pointer; }
-        .tile.selected { border-color: #f00; background: #200; }
-        .player-row { padding: 10px; border: 1px solid #333; margin-bottom: 5px; cursor: pointer; }
-        .player-row.selected { background: #f00; color: #000; }
-        button { background: #f00; color: #000; border: none; padding: 20px; width: 100%; font-weight: bold; margin-top: 20px; cursor: pointer; }
+        .tile { border: 1px solid #0f0; padding: 10px; text-align: center; cursor: pointer; }
+        .tile.selected { background: #0f0; color: #000; font-weight: bold; }
+        .controls { margin-top: 20px; border-top: 1px solid #0f0; padding-top: 20px; }
+        input { background: #000; border: 1px solid #0f0; color: #0f0; padding: 10px; margin-bottom: 10px; width: 100%; box-sizing: border-box; }
+        button { background: #0f0; color: #000; border: none; padding: 20px; width: 100%; font-weight: bold; cursor: pointer; font-size: 1.2em; }
     </style></head><body>
-        <h1>🛰️ LOGISTICS KING V3</h1>
-        <div class="container">
-            <div class="panel"><h3>WAREHOUSE</h3><div class="grid" id="items"></div></div>
-            <div class="panel"><h3>PLAYERS</h3><div id="players"></div>
-            <br>CUSTOM: <input id="custom" placeholder="X Y Z" style="width:100%"></div>
+        <h1>WAREHOUSE SYSTEM v5.0</h1>
+        <div class="grid" id="items"></div>
+        <div class="controls">
+            QUANTITY: <input type="number" id="qty" value="64">
+            COORDINATES (X Y Z): <input type="text" id="coords" placeholder="Example: 150 64 -200">
+            <button onclick="send()">DISPATCH BOT</button>
         </div>
-        <button onclick="send()">DISPATCH</button>
         <script>
-            let sI=null; let sP=null;
+            let sI=null;
             async function load() {
-                const items = await(await fetch('/stashes')).json();
-                const players = await(await fetch('/players')).json();
-                document.getElementById('items').innerHTML = Object.entries(items).map(([n,c]) => 
-                    \`<div class="tile \${sI==n?'selected':''}" onclick="sItem('\${n}')">\${n.replace(/_/g,' ')}<br><b>\${c}</b></div>\`
-                ).join('');
-                document.getElementById('players').innerHTML = players.map(p => 
-                    \`<div class="player-row \${sP?.username==p.username?'selected':''}" onclick="sPlayer('\${p.username}',\${p.x},\${p.y},\${p.z})">👤 \${p.username}</div>\`
+                const d = await(await fetch('/stashes')).json();
+                document.getElementById('items').innerHTML = Object.entries(d).map(([n,c]) => 
+                    \`<div class="tile \${sI==n?'selected':''}" onclick="sel('\${n}')">\${n.replace(/_/g,' ').toUpperCase()}<br>STOCK: \${c}</div>\`
                 ).join('');
             }
-            function sItem(n){ sI=n; load(); }
-            function sPlayer(u,x,y,z){ sP={username:u,x,y,z}; load(); }
+            function sel(n){ sI=n; load(); }
             function send() {
-                let coords = sP ? {x:sP.x, y:sP.y, z:sP.z} : null;
-                const cBox = document.getElementById('custom').value;
-                if(cBox) { const c = cBox.split(' '); coords = {x:c[0], y:c[1], z:c[2]}; }
+                const q = document.getElementById('qty').value;
+                const c = document.getElementById('coords').value.split(' ');
+                if(!sI || c.length < 3) return alert("Select Item and Cords!");
                 fetch('/order', { method:'POST', headers:{'Content-Type':'application/json'}, 
-                body: JSON.stringify({itemName:sI, count:64, ...coords, targetPlayer: sP?.username})});
-                alert("Dispatched!");
+                body: JSON.stringify({itemName:sI, count:q, x:c[0], y:c[1], z:c[2]})});
+                alert("Order Dispatched!");
             }
-            setInterval(load, 3000); load();
+            setInterval(load, 5000); load();
         </script></body></html>`);
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log('Terminal Ready'));
+app.listen(PORT, () => console.log('Terminal Ready on ' + PORT));
 createBot();
-                                
-
+                    
