@@ -115,24 +115,57 @@ app.post('/order', async (req, res) => {
             }
         }
 
-        // 3. Packing
+                // 3. PACKING (Stable Math Version)
         bot.pathfinder.setGoal(null);
-        const ground = bot.entity.position.offset(1, -1, 0).floored();
-        const boxPos = bot.entity.position.offset(1, 0, 0).floored();
-        const shulkerInInv = bot.inventory.items().find(i => i.name.includes('shulker_box'));
+        await wait(500);
+
+        // Get the bot's current position safely
+        const curPos = bot.entity.position;
         
+        // Calculate ground and box position using standard Math
+        const groundPos = new Vec3(
+            Math.floor(curPos.x) + 1, 
+            Math.floor(curPos.y) - 1, 
+            Math.floor(curPos.z)
+        );
+        const boxPos = new Vec3(
+            Math.floor(curPos.x) + 1, 
+            Math.floor(curPos.y), 
+            Math.floor(curPos.z)
+        );
+
+        console.log(`📦 Placing shulker at: ${boxPos}`);
+
+        // Ensure the spot is clear
+        const blockInWay = bot.blockAt(boxPos);
+        if (blockInWay && blockInWay.name !== 'air') {
+            await bot.dig(blockInWay);
+            await wait(500);
+        }
+
+        const shulkerInInv = bot.inventory.items().find(i => i.name.includes('shulker_box'));
+        if (!shulkerInInv) throw new Error("Shulker lost during gathering");
+
         await bot.equip(shulkerInInv, 'hand');
-        await bot.placeBlock(bot.blockAt(ground), new Vec3(0, 1, 0));
+        await wait(500);
+        
+        // Place the block against the ground block
+        await bot.placeBlock(bot.blockAt(groundPos), new Vec3(0, 1, 0));
         await wait(1500);
+        
         const box = await bot.openContainer(bot.blockAt(boxPos));
-        for (const item of bot.inventory.items().filter(i => i.name === itemName)) {
+        const itemsToPack = bot.inventory.items().filter(i => i.name === itemName);
+        for (const item of itemsToPack) {
             await box.deposit(item.type, null, item.count);
-            await wait(200);
+            await wait(300);
         }
         box.close();
         await wait(1000);
+
+        // Break the box to pick it up
         await bot.dig(bot.blockAt(boxPos));
         await wait(1500);
+
 
         // 4. SMART DELIVERY (Dynamic Goal)
         if (targetPlayer) {
@@ -222,3 +255,4 @@ app.get('/', (req, res) => {
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log('Logistics Terminal Live'));
 createBot();
+
