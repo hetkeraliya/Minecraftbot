@@ -11,7 +11,7 @@ const SETTINGS = {
     host: 'Bottest-wIQk.aternos.me', 
     port: 56433,              
     username: 'Cub_bot',
-    version: '1.21.1', 
+    version: '1.21.5', 
     auth: 'offline'
 };
 
@@ -280,3 +280,4 @@ app.get('/', (req, res) => {
 app.listen(10000);
 createBot();
         
+
