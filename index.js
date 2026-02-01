@@ -8,7 +8,7 @@ const bodyParser = require('body-parser');
 // --- CONFIGURATION ---
 const STASH_FILE = 'stashes.json';
 const SETTINGS = {
-    host: 'Bottest-wIQk.aternos.me:56433', // Use the numeric IP from your error log
+    host: 'Bottest-wIQk.aternos.me', // Use the numeric IP from your error log
     port: 56433,            // Use the port from your error log
     username: 'Cub_bot',
     version: '1.21.5',
@@ -232,5 +232,6 @@ const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log('Terminal Live'));
 createBot();
                                            
+
 
 
