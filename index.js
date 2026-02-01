@@ -1,11 +1,10 @@
-const mineflayer = require('mineflayer');
+                    const mineflayer = require('mineflayer');
 const { pathfinder, Movements, goals } = require('mineflayer-pathfinder');
 const { Vec3 } = require('vec3');
 const fs = require('fs');
 const express = require('express');
 const bodyParser = require('body-parser');
 
-// --- CONFIGURATION ---
 const STASH_FILE = 'stashes.json';
 const SETTINGS = {
     host: 'Bottest-wIQk.aternos.me', 
@@ -18,10 +17,30 @@ const SETTINGS = {
 const app = express();
 app.use(bodyParser.json());
 let bot;
-let botStatus = "Initializing AI..."; 
+let botStatus = "Ready"; 
 
 const wait = (ms) => new Promise(res => setTimeout(res, ms));
 const toVec = (pos) => new Vec3(Number(pos.x), Number(pos.y), Number(pos.z));
+
+// --- SMART PLACEMENT AI ---
+async function findSmartSpace() {
+    const searchRadius = 2;
+    for (let x = -searchRadius; x <= searchRadius; x++) {
+        for (let z = -searchRadius; z <= searchRadius; z++) {
+            const checkPos = bot.entity.position.offset(x, 0, z).floored();
+            const groundPos = checkPos.offset(0, -1, 0);
+            
+            const block = bot.blockAt(checkPos);
+            const ground = bot.blockAt(groundPos);
+
+            // Find air with solid ground beneath it
+            if (block && block.name === 'air' && ground && ground.name !== 'air' && ground.name !== 'water') {
+                return { boxPos: checkPos, groundBlock: ground };
+            }
+        }
+    }
+    return null;
+}
 
 const getDB = () => {
     try {
@@ -41,72 +60,41 @@ function createBot() {
         botStatus = "Ready at Warehouse";
         const mcData = require('minecraft-data')(bot.version);
         const movements = new Movements(bot, mcData);
-        
-        // --- ADVANCED AI SETTINGS ---
-        movements.canDig = true;       // Break blocks in way
-        movements.allowSprinting = true;
-        movements.allowParkour = true;  // Jump gaps
-        movements.canPlaceOn = true;   // Bridge across water/void
-        movements.liquidCost = 1;      // Optimized swimming
-        
+        movements.canDig = true;
+        movements.canPlaceOn = true;
         bot.pathfinder.setMovements(movements);
     });
 
+    // ... (Existing !scan and !setspawn logic)
     bot.on('chat', async (username, message) => {
         if (username === bot.username) return;
-
-        if (message === '!setspawn') {
-            botStatus = "Setting Spawn...";
-            bot.chat('> Locating bed...');
-            const bed = bot.findBlock({ matching: b => bot.isABed(b), maxDistance: 32 });
-            if (bed) {
-                await bot.pathfinder.goto(new goals.GoalGetToBlock(bed.position.x, bed.position.y, bed.position.z));
-                await bot.activateBlock(bed);
-                await wait(2000);
-                bot.chat('> Spawn Locked.');
-                botStatus = "Spawn Locked";
-            }
-        }
-
         if (message === '!scan') {
-            botStatus = "Scanning Warehouse...";
-            bot.chat('> Beginning warehouse scan...');
-            const containers = bot.findBlocks({
-                matching: b => ['chest', 'shulker_box', 'barrel', 'trapped_chest'].some(n => b.name.includes(n)),
-                maxDistance: 64, count: 100
-            });
+            botStatus = "Scanning...";
+            const containers = bot.findBlocks({ matching: b => ['chest', 'shulker_box', 'barrel'].some(n => b.name.includes(n)), maxDistance: 64, count: 50 });
             let db = [];
             for (const pos of containers) {
-                const target = toVec(pos);
-                await bot.pathfinder.goto(new goals.GoalGetToBlock(target.x, target.y, target.z));
-                const container = await bot.openContainer(bot.blockAt(target));
-                db.push({ pos: {x: target.x, y: target.y, z: target.z}, items: container.containerItems().map(i => ({ name: i.name, count: i.count })) });
+                await bot.pathfinder.goto(new goals.GoalGetToBlock(pos.x, pos.y, pos.z));
+                const container = await bot.openContainer(bot.blockAt(pos));
+                db.push({ pos, items: container.containerItems().map(i => ({ name: i.name, count: i.count })) });
                 saveDB(db);
                 container.close();
-                await wait(300);
             }
-            bot.chat('> Scan Complete.');
-            botStatus = "Scan Complete";
+            botStatus = "Scan Done";
         }
     });
 
-    bot.on('end', () => {
-        botStatus = "Disconnected";
-        setTimeout(createBot, 10000);
-    });
+    bot.on('end', () => setTimeout(createBot, 10000));
 }
 
-// --- SMART AI DELIVERY MISSION ---
 app.post('/order', async (req, res) => {
     const { itemName, count, x, y, z, targetPlayer } = req.body;
     const targetQty = Math.abs(parseInt(count)) || 64;
-    const dest = { x: Number(x), y: Number(y), z: Number(z) };
-    res.json({ status: 'AI Mission Dispatched' });
+    res.json({ status: 'Dispatched' });
 
     try {
-        let db = getDB();
+        const db = getDB();
         
-        // 1. GATHER ASSETS
+        // 1. GATHERING
         botStatus = "Gathering Shulker & Items...";
         const shulkerStash = db.find(s => s.items.some(i => i.name.includes('shulker_box')));
         await bot.pathfinder.goto(new goals.GoalGetToBlock(shulkerStash.pos.x, shulkerStash.pos.y, shulkerStash.pos.z));
@@ -131,105 +119,81 @@ app.post('/order', async (req, res) => {
             }
         }
 
-        // 2. PACKING
-        botStatus = "Packing Delivery Box...";
-        const bx = Math.floor(bot.entity.position.x) + 1;
-        const by = Math.floor(bot.entity.position.y);
-        const bz = Math.floor(bot.entity.position.z);
-        const boxPos = new Vec3(bx, by, bz);
-        const groundPos = new Vec3(bx, by - 1, bz);
-
-        await bot.equip(bot.inventory.items().find(i => i.name.includes('shulker_box')), 'hand');
-        await bot.placeBlock(bot.blockAt(groundPos), new Vec3(0, 1, 0));
-        await wait(1500);
-        const packBox = await bot.openContainer(bot.blockAt(boxPos));
-        for (const i of bot.inventory.items().filter(i => i.name === itemName)) await packBox.deposit(i.type, null, i.count);
-        packBox.close();
+        // 2. THE SMART PACK (NEW AI)
+        botStatus = "Finding Empty Space...";
+        bot.pathfinder.setGoal(null);
         await wait(500);
-        await bot.dig(bot.blockAt(boxPos));
 
-        // 3. SMART AI TRACKING & DELIVERY
+        const space = await findSmartSpace();
+        if (!space) {
+            bot.chat("No space to place shulker! Standing in fire instead.");
+            throw new Error("No Space");
+        }
+
+        // Move slightly away from the spot to have reach room
+        await bot.pathfinder.goto(new goals.GoalNear(space.boxPos.x + 1, space.boxPos.y, space.boxPos.z + 1, 1));
+        
+        const shulkerInInv = bot.inventory.items().find(i => i.name.includes('shulker_box'));
+        await bot.equip(shulkerInInv, 'hand');
+        await wait(800);
+
+        botStatus = "Placing Shulker...";
+        await bot.placeBlock(space.groundBlock, new Vec3(0, 1, 0));
+        await wait(1500);
+
+        const packBox = await bot.openContainer(bot.blockAt(space.boxPos));
+        for (const i of bot.inventory.items().filter(i => i.name === itemName)) {
+            await packBox.deposit(i.type, null, i.count);
+        }
+        packBox.close();
+        await wait(1000);
+
+        botStatus = "Recovering Shulker...";
+        await bot.dig(bot.blockAt(space.boxPos));
+        await bot.pathfinder.goto(new goals.GoalGetToBlock(space.boxPos.x, space.boxPos.y, space.boxPos.z));
+        await wait(1500);
+
+        // 3. DELIVERY & KAMIKAZE
         if (targetPlayer) {
-            botStatus = `AI Tracking Player: ${targetPlayer}`;
             const player = bot.players[targetPlayer]?.entity;
-            if (player) {
-                await bot.pathfinder.goto(new goals.GoalFollow(player, 0));
-            } else {
-                botStatus = "Player lost, using last known coordinates";
-                await bot.pathfinder.goto(new goals.GoalNear(dest.x, dest.y, dest.z, 0));
-            }
+            await bot.pathfinder.goto(new goals.GoalFollow(player || bot.entity, 0));
         } else {
-            botStatus = `AI Traveling to Cords: ${dest.x}, ${dest.z}`;
-            await bot.pathfinder.goto(new goals.GoalNear(dest.x, dest.y, dest.z, 0));
+            await bot.pathfinder.goto(new goals.GoalNear(Number(x), Number(y), Number(z), 0));
         }
         
-        // 4. THE SACRIFICE
-        botStatus = "Arrived. Executing Suicide Drop.";
+        botStatus = "Sacrifice Mode";
         await wait(1000);
         bot.chat('/kill');
 
-        // 5. UPDATE DATABASE
-        let finalDB = getDB();
-        let deductLeft = targetQty;
-        finalDB = finalDB.map(s => {
-            s.items = s.items.map(it => {
-                if (it.name === itemName && deductLeft > 0) {
-                    const take = Math.min(it.count, deductLeft);
-                    it.count -= take;
-                    deductLeft -= take;
-                }
-                return it;
-            }).filter(it => it.count > 0);
-            return s;
-        });
-        saveDB(finalDB);
-        botStatus = "Mission Success. Respawning.";
-
-    } catch (e) { botStatus = "Error: " + e.message; }
+    } catch (e) { botStatus = "AI Error: " + e.message; }
 });
 
-// --- DASHBOARD API ---
-app.get('/players', (req, res) => {
-    if (!bot || !bot.entities) return res.json([]);
-    const players = Object.values(bot.entities)
-        .filter(e => e.type === 'player' && e.username !== bot.username)
-        .map(p => ({ username: p.username, x: Math.floor(p.position.x), y: Math.floor(p.position.y), z: Math.floor(p.position.z) }));
-    res.json(players);
-});
-
+// --- API & UI ---
 app.get('/status', (req, res) => res.json({ status: botStatus }));
-
 app.get('/stashes', (req, res) => {
     const db = getDB();
     const totals = {};
-    db.forEach(s => s.items.forEach(i => {
-        if(!i.name.includes('shulker_box')) totals[i.name] = (totals[i.name] || 0) + i.count;
-    }));
+    db.forEach(s => s.items.forEach(i => { if(!i.name.includes('shulker_box')) totals[i.name] = (totals[i.name] || 0) + i.count; }));
     res.json(totals);
 });
-
+app.get('/players', (req, res) => {
+    if (!bot || !bot.entities) return res.json([]);
+    const players = Object.values(bot.entities).filter(e => e.type === 'player' && e.username !== bot.username).map(p => ({ username: p.username, x: p.position.x, y: p.position.y, z: p.position.z }));
+    res.json(players);
+});
 app.get('/', (req, res) => {
-    res.send(`<html><head><style>
-        body { background: #000; color: #0f0; font-family: monospace; padding: 20px; }
-        .panel { border: 2px solid #0f0; padding: 15px; margin-bottom: 20px; background: #111; }
-        .container { display: flex; gap: 20px; }
-        .sub-panel { flex: 1; border: 1px solid #0f0; padding: 10px; height: 50vh; overflow-y: auto; }
-        .tile { border: 1px solid #444; padding: 8px; text-align: center; cursor: pointer; margin-bottom: 5px; }
-        .tile.selected { background: #040; border-color: #0f0; }
-        button { width: 100%; background: #0f0; color: #000; border: none; padding: 15px; font-weight: bold; cursor: pointer; margin-top: 15px; }
-    </style></head><body>
-        <div class="panel">
-            <h2 style="margin:0;">🤖 AI OVERLORD STATUS</h2>
-            <div id="status" style="font-size: 1.5em; color: #fff;">Connecting...</div>
+    res.send(`<html><body style="background:#000;color:#0f0;font-family:monospace;padding:20px;">
+        <div style="border:2px solid #0f0;padding:15px;background:#111;">
+            <h2>🤖 LOGISTICS AI</h2>
+            <div id="status">Connecting...</div>
         </div>
-        <div class="container">
-            <div class="sub-panel"><h3>1. WAREHOUSE STOCK</h3><div id="items"></div></div>
-            <div class="sub-panel"><h3>2. NEARBY PLAYERS</h3><div id="players"></div></div>
+        <div style="display:flex;gap:20px;margin-top:20px;">
+            <div style="flex:1;"><h3>WAREHOUSE</h3><div id="items"></div></div>
+            <div style="flex:1;"><h3>PLAYERS</h3><div id="players"></div></div>
         </div>
-        <div class="panel">
-            QTY: <input type="number" id="qty" value="64" style="background:#000;color:#0f0;border:1px solid #0f0;">
-            OR CUSTOM COORDS: <input type="text" id="cor" placeholder="X Y Z" style="background:#000;color:#0f0;border:1px solid #0f0;">
-            <button onclick="send()">DISPATCH AI MISSION</button>
+        <div style="margin-top:20px;border:1px solid #0f0;padding:15px;">
+            QTY: <input type="number" id="qty" value="64">
+            <button onclick="send()">DISPATCH MISSION</button>
         </div>
         <script>
             let sI=null; let sP=null;
@@ -238,24 +202,18 @@ app.get('/', (req, res) => {
                 const s = await(await fetch('/status')).json();
                 const p = await(await fetch('/players')).json();
                 document.getElementById('status').innerText = s.status;
-                document.getElementById('items').innerHTML = Object.entries(d).map(([n,c]) => 
-                    \`<div class="tile \${sI==n?'selected':''}" onclick="sI='\${n}';load()">\${n.replace(/_/g,' ').toUpperCase()}<br><b>\${c}</b></div>\`
-                ).join('');
-                document.getElementById('players').innerHTML = p.map(player => 
-                    \`<div class="tile \${sP?.username==player.username?'selected':''}" onclick="sP={username:'\${player.username}',x:\${player.x},y:\${player.y},z:\${player.z}};load()">👤 \${player.username}</div>\`
-                ).join('');
+                document.getElementById('items').innerHTML = Object.entries(d).map(([n,c]) => \`<div onclick="sI='\${n}';load()" style="border:1px solid #444;margin:5px;padding:5px;background:\${sI==n?'#040':'none'}">\${n} (\${c})</div>\`).join('');
+                document.getElementById('players').innerHTML = p.map(player => \`<div onclick="sP={username:'\${player.username}',x:\${player.x},y:\${player.y},z:\${player.z}};load()" style="border:1px solid #444;margin:5px;padding:5px;background:\${sP?.username==player.username?'#040':'none'}">👤 \${player.username}</div>\`).join('');
             }
             function send() {
                 const q = document.getElementById('qty').value;
-                const c = document.getElementById('cor').value.split(' ');
-                let coords = sP ? {x:sP.x, y:sP.y, z:sP.z} : {x:c[0], y:c[1], z:c[2]};
-                fetch('/order',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({itemName:sI,count:q, ...coords, targetPlayer: sP?.username})});
-                alert("AI Dispatched.");
+                if(!sI) return alert("Select Item!");
+                fetch('/order',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({itemName:sI,count:q,x:sP?.x||0,y:sP?.y||0,z:sP?.z||0,targetPlayer:sP?.username})});
             }
             setInterval(load, 2000); load();
         </script></body></html>`);
 });
 
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log('Terminal Ready'));
+app.listen(10000);
 createBot();
+                      
