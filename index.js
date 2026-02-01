@@ -8,14 +8,12 @@ const bodyParser = require('body-parser');
 // --- CONFIGURATION ---
 const STASH_FILE = 'stashes.json';
 const SETTINGS = {
-    host: 'Bottest-wIQk.aternos.me', // Use the numeric IP from your error log
-    port: 56433,            // Use the port from your error log
+    host: 'Bottest-wIQk.aternos.me', 
+    port: 56433,              
     username: 'Cub_bot',
     version: '1.21.5',
-    auth: 'offline',
-    checkTimeoutInterval: 120000 
+    auth: 'offline'
 };
-
 
 const app = express();
 app.use(bodyParser.json());
@@ -49,14 +47,11 @@ function createBot() {
     bot.on('chat', async (username, message) => {
         if (username === bot.username) return;
         if (message === '!scan') {
-            bot.chat('🔍 Scanning warehouse (64 block radius)...');
+            bot.chat('🔍 Scanning warehouse...');
             const containers = bot.findBlocks({
                 matching: b => ['chest', 'shulker_box', 'barrel', 'trapped_chest'].some(n => b.name.includes(n)),
                 maxDistance: 64, count: 100
             });
-
-            if (containers.length === 0) return bot.chat('❌ No chests found!');
-            
             let db = [];
             for (const pos of containers) {
                 try {
@@ -64,21 +59,20 @@ function createBot() {
                     await bot.pathfinder.goto(new goals.GoalGetToBlock(target.x, target.y, target.z));
                     await wait(800);
                     const container = await bot.openContainer(bot.blockAt(target));
-                    const items = container.containerItems().map(i => ({ name: i.name, count: i.count }));
-                    db.push({ pos: {x: target.x, y: target.y, z: target.z}, items });
+                    db.push({ pos: {x: target.x, y: target.y, z: target.z}, items: container.containerItems().map(i => ({ name: i.name, count: i.count })) });
                     saveDB(db);
                     container.close();
                     await wait(300);
-                } catch (e) { console.log('Skipped chest at ' + pos); }
+                } catch (e) { console.log('Scan skip:', e.message); }
             }
-            bot.chat('✅ Scan Complete. Dashboard updated.');
+            bot.chat('✅ Scan Complete.');
         }
     });
 
     bot.on('end', () => setTimeout(createBot, 10000));
 }
 
-// --- ORDER LOGIC WITH PACKING & AUTO-DEDUCTION ---
+// --- SECURE ORDER & DELIVERY ---
 app.post('/order', async (req, res) => {
     const { itemName, count, x, y, z } = req.body;
     const targetQty = parseInt(count) || 64;
@@ -107,7 +101,6 @@ app.post('/order', async (req, res) => {
             if (gathered >= targetQty) break;
             const itemMatch = stash.items.find(i => i.name === itemName);
             if (!itemMatch) continue;
-
             await bot.pathfinder.goto(new goals.GoalGetToBlock(stash.pos.x, stash.pos.y, stash.pos.z));
             const c = await bot.openContainer(bot.blockAt(toVec(stash.pos)));
             const available = c.containerItems().find(i => i.name === itemName);
@@ -120,10 +113,9 @@ app.post('/order', async (req, res) => {
             await wait(800);
         }
 
-        // 3. SECURE PACKING
+        // 3. SECURE PACKING (WITH RETRY)
         bot.pathfinder.setGoal(null);
         await wait(500);
-
         const bx = Math.floor(bot.entity.position.x) + 1;
         const by = Math.floor(bot.entity.position.y);
         const bz = Math.floor(bot.entity.position.z);
@@ -133,10 +125,16 @@ app.post('/order', async (req, res) => {
         const shulkerInv = bot.inventory.items().find(i => i.name.includes('shulker_box'));
         await bot.equip(shulkerInv, 'hand');
         await wait(500);
-        await bot.placeBlock(bot.blockAt(groundPos), new Vec3(0, 1, 0));
-        await wait(1500);
 
-        if (bot.blockAt(boxPos).name.includes('shulker_box')) {
+        // Retry placement 3 times
+        let placed = false;
+        for (let i = 0; i < 3; i++) {
+            if (bot.blockAt(boxPos).name.includes('shulker_box')) { placed = true; break; }
+            await bot.placeBlock(bot.blockAt(groundPos), new Vec3(0, 1, 0)).catch(() => {});
+            await wait(1500);
+        }
+
+        if (placed || bot.blockAt(boxPos).name.includes('shulker_box')) {
             const box = await bot.openContainer(bot.blockAt(boxPos));
             const toPack = bot.inventory.items().filter(i => i.name === itemName);
             for (const item of toPack) {
@@ -147,28 +145,34 @@ app.post('/order', async (req, res) => {
             await wait(1000);
             await bot.dig(bot.blockAt(boxPos));
             await wait(1500);
+        } else {
+            bot.chat('⚠️ Packing failed. Dropping items loose.');
         }
 
-        // 4. DELIVERY & SMART DROP
-        bot.chat(`🚚 Delivering to ${dest.x} ${dest.y} ${dest.z}`);
-        await bot.pathfinder.goto(new goals.GoalNear(dest.x, dest.y, dest.z, 1));
+        // 4. DELIVERY & DROP (LOOK DOWN FIX)
+        bot.chat(`🚚 Delivering to location...`);
+        await bot.pathfinder.goto(new goals.GoalNear(dest.x, dest.y, dest.z, 0)); // Go EXACTLY to the spot
         
-        bot.pathfinder.setGoal(null);
+        bot.pathfinder.setGoal(null); 
         await wait(2000);
         
-        // Final look down to drop at feet
-        await bot.lookAt(new Vec3(dest.x, dest.y - 1, dest.z));
+        // Ensure the bot looks at the drop spot
+        await bot.lookAt(new Vec3(dest.x, dest.y - 1, dest.z), true);
+        await wait(500);
 
         const packed = bot.inventory.items().find(i => i.name.includes('shulker_box') && i.nbt);
         if (packed) {
             await bot.tossStack(packed);
             bot.chat('✅ Delivered: Shulker dropped.');
         } else {
-            for (const i of bot.inventory.items().filter(i => i.name === itemName)) await bot.tossStack(i);
+            for (const i of bot.inventory.items().filter(i => i.name === itemName)) {
+                await bot.tossStack(i);
+                await wait(200);
+            }
             bot.chat('📦 Delivered: Raw items dropped.');
         }
 
-        // UPDATE DATABASE: Deduct after delivery
+        // 5. INVENTORY DEDUCTION (Sync with dashboard)
         let finalDB = getDB();
         let deductLeft = targetQty;
         finalDB = finalDB.map(s => {
@@ -202,10 +206,10 @@ app.get('/', (req, res) => {
         <h1>LOGISTICS TERMINAL v8.0</h1>
         <div id="items" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px;"></div>
         <hr style="border-color:#0f0;margin:20px 0;">
-        <div style="max-width:400px;">
-            ORDER QTY: <input type="number" id="qty" value="64" style="width:100%;background:#000;color:#0f0;border:1px solid #0f0;padding:5px;"><br><br>
-            COORDS (X Y Z): <input type="text" id="cor" placeholder="100 64 -200" style="width:100%;background:#000;color:#0f0;border:1px solid #0f0;padding:5px;"><br><br>
-            <button onclick="send()" style="width:100%;background:#0f0;color:#000;padding:15px;font-weight:bold;cursor:pointer;">DISPATCH BOT</button>
+        <div>
+            QTY: <input type="number" id="qty" value="64" style="background:#000;color:#0f0;border:1px solid #0f0;padding:5px;"><br><br>
+            COR: <input type="text" id="cor" placeholder="X Y Z" style="background:#000;color:#0f0;border:1px solid #0f0;padding:5px;"><br><br>
+            <button onclick="send()" style="background:#0f0;color:#000;padding:15px;font-weight:bold;cursor:pointer;width:100%;">DISPATCH BOT</button>
         </div>
         <script>
             let sI=null;
@@ -220,7 +224,7 @@ app.get('/', (req, res) => {
             function send() {
                 const q = document.getElementById('qty').value;
                 const c = document.getElementById('cor').value.split(' ');
-                if(!sI || c.length < 3) return alert("Select Item and enter X Y Z!");
+                if(!sI || c.length < 3) return alert("Select Item + Cords!");
                 fetch('/order',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({itemName:sI,count:q,x:c[0],y:c[1],z:c[2]})});
                 alert("Order Dispatched.");
             }
@@ -231,7 +235,4 @@ app.get('/', (req, res) => {
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log('Terminal Live'));
 createBot();
-                                           
-
-
-
+                                                               
