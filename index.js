@@ -30,14 +30,15 @@ const getDB = () => {
 };
 const saveDB = (data) => fs.writeFileSync(STASH_FILE, JSON.stringify(data, null, 2));
 
-async function findPerfectSpace() {
+// AI: Find a 3-block clear space for shulker placement
+async function findSmartSpace() {
     const radius = 2;
     for (let x = -radius; x <= radius; x++) {
         for (let z = -radius; z <= radius; z++) {
             const checkPos = bot.entity.position.offset(x, 0, z).floored();
             const ground = bot.blockAt(checkPos.offset(0, -1, 0));
             const air = bot.blockAt(checkPos);
-            if (air && air.name === 'air' && ground && ground.name !== 'air') {
+            if (air && air.name === 'air' && ground && ground.name !== 'air' && ground.name !== 'water') {
                 return { box: checkPos, ground: ground };
             }
         }
@@ -66,11 +67,11 @@ function createBot() {
             if (bed) {
                 await bot.pathfinder.goto(new goals.GoalGetToBlock(bed.position.x, bed.position.y, bed.position.z));
                 await bot.activateBlock(bed);
-                bot.chat('◈ AI: Spawn Point Set.');
+                bot.chat('◈ AI: Spawn Point Secured.');
             }
         }
         if (message === '!scan') {
-            botStatus = "Auditing Stock...";
+            botStatus = "Auditing Warehouse...";
             const containers = bot.findBlocks({ matching: b => ['chest', 'shulker_box', 'barrel'].some(n => b.name.includes(n)), maxDistance: 64, count: 100 });
             let db = [];
             for (const pos of containers) {
@@ -81,7 +82,7 @@ function createBot() {
                 container.close();
                 await wait(400);
             }
-            bot.chat('◈ AI: Audit Complete.');
+            bot.chat('◈ AI: Catalog Updated.');
             botStatus = "Ready at Warehouse";
         }
     });
@@ -96,9 +97,9 @@ app.post('/order', async (req, res) => {
 
     try {
         let db = getDB();
-        bot.chat(`◈ AI: Initializing delivery of ${targetQty} units.`);
+        bot.chat(`◈ AI: Initializing Bulk Order: ${targetQty}x ${itemName.replace(/_/g, ' ')}`);
 
-        // 1. GATHER SHULKER
+        // 1. GET PACKAGING
         botStatus = "Retrieving Shulker...";
         const shulkerStash = db.find(s => s.items.some(i => i.name.includes('shulker_box')));
         await bot.pathfinder.goto(new goals.GoalGetToBlock(shulkerStash.pos.x, shulkerStash.pos.y, shulkerStash.pos.z));
@@ -128,13 +129,14 @@ app.post('/order', async (req, res) => {
             }
         }
 
-        // 3. SMART PACK & VACUUM PICKUP
+        // 3. PACKING & SECURE VACUUM
         botStatus = "Packing Assets...";
-        const space = await findPerfectSpace();
+        const space = await findSmartSpace();
         await bot.equip(bot.inventory.items().find(i => i.name.includes('shulker_box')), 'hand');
         await wait(500);
         await bot.placeBlock(space.ground, new Vec3(0, 1, 0));
         await wait(1500);
+
         const packBox = await bot.openContainer(bot.blockAt(space.box));
         for (const i of bot.inventory.items().filter(i => i.name === itemName)) {
             await packBox.deposit(i.type, null, i.count);
@@ -143,13 +145,25 @@ app.post('/order', async (req, res) => {
         packBox.close();
         await wait(1000);
 
-        botStatus = "Vacuum Picking Up Shulker...";
+        // REPAIRED: Dig and Force Vacuum
+        botStatus = "Collecting Shulker...";
         await bot.dig(bot.blockAt(space.box));
-        await bot.pathfinder.goto(new goals.GoalGetToBlock(space.box.x, space.box.y, space.box.z));
-        await wait(3000); // 3-second vacuum lock
+        
+        // Loop until shulker is in inventory or 10 tries fail
+        let shulkerFound = false;
+        for (let attempt = 0; attempt < 10; attempt++) {
+            await bot.pathfinder.goto(new goals.GoalGetToBlock(space.box.x, space.box.y, space.box.z));
+            await wait(1000);
+            if (bot.inventory.items().some(i => i.name.includes('shulker_box') && i.nbt)) {
+                shulkerFound = true;
+                break;
+            }
+        }
 
-        // 4. SMART XZ DELIVERY
-        botStatus = "Navigating to Location...";
+        if (!shulkerFound) throw new Error("Vacuum Failure: Shulker not collected.");
+
+        // 4. SMART NAVIGATION
+        botStatus = "En Route...";
         const tx = Number(x); const tz = Number(z);
         await bot.pathfinder.goto(new goals.GoalNear(tx, 100, tz, 40)); 
         const ty = bot.world.getHighestBlockAt(new Vec3(tx, 0, tz))?.position.y || 64;
@@ -158,11 +172,11 @@ app.post('/order', async (req, res) => {
         const player = bot.nearestEntity(e => e.type === 'player' && e.username !== bot.username);
         if (player) await bot.pathfinder.goto(new goals.GoalFollow(player, 0));
 
-        bot.chat('◈ AI: Arrived. Sacrificing for Drop.');
+        bot.chat('◈ AI: Mission Arrival. Executing Sacrifice.');
         await wait(1000);
         bot.chat('/kill');
 
-        // 5. UPDATE STOCK
+        // 5. DATA SYNC
         let currentDB = getDB();
         let rem = targetQty;
         currentDB = currentDB.map(s => {
@@ -178,10 +192,13 @@ app.post('/order', async (req, res) => {
         });
         saveDB(currentDB);
 
-    } catch (e) { botStatus = "Ready at Warehouse"; bot.chat('◈ ERROR: Dispatch Failure.'); }
+    } catch (e) { 
+        botStatus = "System Ready"; 
+        bot.chat(`◈ AI ERROR: ${e.message}`); 
+    }
 });
 
-// --- PORCELAIN & SAND BOUTIQUE UI ---
+// --- WHITE & CREAM BOUTIQUE UI ---
 app.get('/status', (req, res) => res.json({ status: botStatus }));
 app.get('/stashes', (req, res) => {
     const db = getDB();
@@ -200,22 +217,19 @@ app.get('/', (req, res) => {
     <style>
         :root { --bg: #FDFCF8; --white: #FFFFFF; --cream: #F5F1E9; --accent: #D4A373; --text: #4A4A4A; }
         body { background: var(--bg); color: var(--text); font-family: -apple-system, sans-serif; margin: 0; padding: 25px; }
-        .nav { display: flex; justify-content: space-between; align-items: center; padding: 30px 0; border-bottom: 1px solid var(--cream); margin-bottom: 40px; }
+        .nav { display: flex; justify-content: space-between; align-items: center; margin-bottom: 40px; }
         .status-pill { background: var(--white); padding: 12px 25px; border-radius: 50px; font-size: 0.85em; font-weight: 700; color: var(--accent); box-shadow: 0 4px 15px rgba(0,0,0,0.04); }
         .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(175px, 1fr)); gap: 20px; }
-        .card { background: var(--white); border-radius: 20px; padding: 35px 20px; text-align: center; box-shadow: 0 5px 15px rgba(0,0,0,0.03); transition: 0.3s; cursor: pointer; border: 1px solid transparent; }
+        .card { background: var(--white); border-radius: 20px; padding: 35px 20px; text-align: center; box-shadow: 0 5px 15px rgba(0,0,0,0.03); cursor: pointer; border: 1px solid transparent; }
         .card:hover { transform: translateY(-5px); border-color: var(--accent); }
         .card.active { border-color: var(--accent); background: var(--cream); }
-        .player-row { padding: 20px; background: var(--white); border-radius: 15px; margin-bottom: 12px; display: flex; justify-content: space-between; cursor: pointer; box-shadow: 0 4px 12px rgba(0,0,0,0.03); border: 1px solid transparent; }
-        .player-row.active { border-color: var(--accent); background: var(--cream); color: var(--accent); font-weight: bold; }
-        .checkout { position: sticky; bottom: 25px; background: var(--white); border-radius: 25px; padding: 25px; display: flex; gap: 15px; box-shadow: 0 -10px 40px rgba(0,0,0,0.06); margin-top: 50px; border: 1px solid var(--cream); }
+        .checkout { position: sticky; bottom: 25px; background: var(--white); border-radius: 25px; padding: 25px; display: flex; gap: 15px; box-shadow: 0 -10px 40px rgba(0,0,0,0.06); margin-top: 50px; }
         input { flex: 1; border: 1px solid var(--cream); padding: 15px; border-radius: 12px; background: var(--bg); outline: none; font-weight: 600; }
-        button { background: var(--accent); color: white; border: none; padding: 15px 45px; border-radius: 12px; font-weight: 800; cursor: pointer; text-transform: uppercase; letter-spacing: 1.5px; }
+        button { background: var(--accent); color: white; border: none; padding: 15px 45px; border-radius: 12px; font-weight: 800; cursor: pointer; text-transform: uppercase; }
     </style></head><body>
         <div class="nav"><h2>CUB LOGISTICS</h2> <div class="status-pill">● <span id="st">Ready</span></div></div>
         <div class="grid" id="it"></div>
-        <h4 style="margin: 40px 0 15px 0; color: #BBB; font-size: 0.7em; text-transform: uppercase; letter-spacing: 1px;">Detected Clients</h4>
-        <div id="pl"></div>
+        <div id="pl" style="margin-top: 30px;"></div>
         <div class="checkout">
             <input type="number" id="q" value="64">
             <input type="text" id="c" placeholder="X Z">
@@ -230,13 +244,12 @@ app.get('/', (req, res) => {
                 document.getElementById('st').innerText = status.status;
                 document.getElementById('it').innerHTML = Object.entries(items).map(([n,c]) => \`
                     <div class="card \${si==n?'active':''}" onclick="si='\${n}';sync()">
-                        <div style="font-size: 0.7em; color: var(--accent); font-weight: 800; letter-spacing: 1px;">STOCK</div>
-                        <div style="font-weight: 700; font-size: 1.25em; margin: 15px 0;">\${n.replace(/_/g,' ').toUpperCase()}</div>
-                        <div style="color: #999;">\${c} Units Available</div>
+                        <div style="font-weight: 700; font-size: 1.1em; margin: 10px 0;">\${n.replace(/_/g,' ').toUpperCase()}</div>
+                        <div style="color: #999; font-size: 0.85em;">\${c} Units</div>
                     </div>\`).join('');
                 document.getElementById('pl').innerHTML = players.map(p => \`
-                    <div class="player-row \${sp?.u==p.u?'active':''}" onclick="sp={u:'\${p.u}',x:\${p.x},z:\${p.z}};sync()">
-                        <span>👤 \${p.u}</span> <span>Cords: \${p.x} / \${p.z}</span>
+                    <div onclick="sp={u:'\${p.u}',x:\${p.x},z:\${p.z}}" style="padding:15px; background:white; margin-bottom:10px; border-radius:15px; cursor:pointer; display:flex; justify-content:space-between; box-shadow:0 4px 10px rgba(0,0,0,0.02);">
+                        <span>👤 \${p.u}</span> <span>\${p.x} / \${p.z}</span>
                     </div>\`).join('');
             }
             function order(){
@@ -244,7 +257,7 @@ app.get('/', (req, res) => {
                 const c = document.getElementById('c').value.split(' ');
                 let p = sp ? {x:sp.x, z:sp.z} : {x:c[0]||0, z:c[1]||0};
                 fetch('/order',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({itemName:si,count:q,x:p.x,z:p.z})});
-                alert("Order Dispatch Successful.");
+                alert("Dispatching AI...");
             }
             setInterval(sync, 2000); sync();
         </script></body></html>`);
@@ -252,4 +265,4 @@ app.get('/', (req, res) => {
 
 app.listen(10000);
 createBot();
-                                       
+                                                                            
