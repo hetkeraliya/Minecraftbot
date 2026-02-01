@@ -11,7 +11,7 @@ const SETTINGS = {
     host: 'Bottest-wIQk.aternos.me', 
     port: 56433,              
     username: 'Cub_bot',
-    version: '1.21.5', 
+    version: '1.21.1', 
     auth: 'offline'
 };
 
@@ -64,7 +64,6 @@ function createBot() {
         bot.pathfinder.setMovements(movements);
     });
 
-    // --- DEEP AUDIT AI ---
     bot.on('chat', async (username, message) => {
         if (username === bot.username) return;
 
@@ -150,7 +149,7 @@ app.post('/order', async (req, res) => {
         const space = await findSmartSpace();
         await bot.equip(bot.inventory.items().find(i => i.name.includes('shulker_box')), 'hand');
         await wait(500);
-        await bot.placeBlock(space.ground, new Vec3(0, 1, 0));
+        await bot.placeBlock(bot.blockAt(space.ground.position), new Vec3(0, 1, 0));
         await wait(1500);
 
         const packBox = await bot.openContainer(bot.blockAt(space.box));
@@ -161,6 +160,7 @@ app.post('/order', async (req, res) => {
         packBox.close();
         await wait(1000);
 
+        // --- THE VACUUM FIX ---
         botStatus = "Confirming Vacuum Pickup...";
         await bot.dig(bot.blockAt(space.box));
         
@@ -279,5 +279,4 @@ app.get('/', (req, res) => {
 
 app.listen(10000);
 createBot();
-        
-
+         
