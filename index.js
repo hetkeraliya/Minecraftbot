@@ -5,24 +5,22 @@ const fs = require('fs');
 const express = require('express');
 const bodyParser = require('body-parser');
 
-// --- CONFIGURATION ---
+// --- SETTINGS ---
 const STASH_FILE = 'stashes.json';
 const SETTINGS = {
     host: 'Bottest-wIQk.aternos.me', 
     port: 56433,              
     username: 'Cub_bot',
-    version: '1.21.5', 
+    version: '1.21.1', 
     auth: 'offline'
 };
 
 const app = express();
 app.use(bodyParser.json());
 let bot;
-let botStatus = "System Operational"; 
+let botStatus = "System Idle"; 
 
 const wait = (ms) => new Promise(res => setTimeout(res, ms));
-
-// --- DATA PERSISTENCE ---
 const getDB = () => {
     try {
         if (!fs.existsSync(STASH_FILE)) return [];
@@ -32,7 +30,6 @@ const getDB = () => {
 };
 const saveDB = (data) => fs.writeFileSync(STASH_FILE, JSON.stringify(data, null, 2));
 
-// AI: Find a 3-block radius safe placement zone
 async function findSmartSpace() {
     const radius = 2;
     for (let x = -radius; x <= radius; x++) {
@@ -40,9 +37,7 @@ async function findSmartSpace() {
             const checkPos = bot.entity.position.offset(x, 0, z).floored();
             const ground = bot.blockAt(checkPos.offset(0, -1, 0));
             const air = bot.blockAt(checkPos);
-            if (air && air.name === 'air' && ground && ground.name !== 'air' && ground.name !== 'water') {
-                return { box: checkPos, ground: ground };
-            }
+            if (air && air.name === 'air' && ground && ground.name !== 'air') return { box: checkPos, ground: ground };
         }
     }
     return null;
@@ -54,66 +49,55 @@ function createBot() {
     bot.loadPlugin(pathfinder);
 
     bot.on('spawn', () => {
-        botStatus = "Active & Ready";
+        botStatus = "Ready at Warehouse";
         const mcData = require('minecraft-data')(bot.version);
         const movements = new Movements(bot, mcData);
         movements.canDig = true;
         movements.canPlaceOn = true;
-        movements.allowSprinting = true;
-        movements.allowParkour = true;
         bot.pathfinder.setMovements(movements);
     });
 
     bot.on('chat', async (username, message) => {
         if (username === bot.username) return;
-
         if (message === '!setspawn') {
-            bot.chat('◈ AI: Syncing Respawn...');
             const bed = bot.findBlock({ matching: b => bot.isABed(b), maxDistance: 32 });
             if (bed) {
                 await bot.pathfinder.goto(new goals.GoalGetToBlock(bed.position.x, bed.position.y, bed.position.z));
                 await bot.activateBlock(bed);
-                bot.chat('◈ AI: Spawn Point Secured.');
+                bot.chat('◈ AI: Spawn Point Set.');
             }
         }
-
         if (message === '!scan') {
-            botStatus = "Deep Scanning Catalog...";
-            bot.chat('◈ AI: Commencing Warehouse Audit...');
+            botStatus = "Auditing...";
             const containers = bot.findBlocks({ matching: b => ['chest', 'shulker_box', 'barrel'].some(n => b.name.includes(n)), maxDistance: 64, count: 100 });
             let db = [];
             for (const pos of containers) {
-                try {
-                    await bot.pathfinder.goto(new goals.GoalGetToBlock(pos.x, pos.y, pos.z));
-                    bot.pathfinder.setGoal(null);
-                    await wait(800);
-                    const container = await bot.openContainer(bot.blockAt(pos));
-                    db.push({ pos, items: container.containerItems().map(i => ({ name: i.name, count: i.count })) });
-                    saveDB(db);
-                    container.close();
-                    await wait(500);
-                } catch (e) { console.log("Scan error at: " + pos); }
+                await bot.pathfinder.goto(new goals.GoalGetToBlock(pos.x, pos.y, pos.z));
+                const container = await bot.openContainer(bot.blockAt(pos));
+                db.push({ pos, items: container.containerItems().map(i => ({ name: i.name, count: i.count })) });
+                saveDB(db);
+                container.close();
+                await wait(400);
             }
-            bot.chat('◈ AI: Audit Complete. Inventory Cataloged.');
-            botStatus = "Active & Ready";
+            bot.chat('◈ AI: Audit Complete.');
+            botStatus = "Ready";
         }
     });
 
     bot.on('end', () => setTimeout(createBot, 10000));
 }
 
-// --- MISSION ENGINE (BULK + VACUUM + AUTO-Y) ---
+// --- CORE MISSION ENGINE ---
 app.post('/order', async (req, res) => {
     const { itemName, count, x, z } = req.body;
     let targetQty = Math.abs(parseInt(count)) || 64;
-    res.json({ status: 'Processing Mission' });
+    res.json({ status: 'Dispatching' });
 
     try {
         let db = getDB();
-        bot.chat(`◈ AI: Dispatching Order [${targetQty}x ${itemName}]`);
+        bot.chat(`◈ AI: Dispatching ${targetQty}x ${itemName}...`);
 
         // 1. GATHER SHULKER
-        botStatus = "Fetching Packaging...";
         const shulkerStash = db.find(s => s.items.some(i => i.name.includes('shulker_box')));
         await bot.pathfinder.goto(new goals.GoalGetToBlock(shulkerStash.pos.x, shulkerStash.pos.y, shulkerStash.pos.z));
         const sCont = await bot.openContainer(bot.blockAt(new Vec3(shulkerStash.pos.x, shulkerStash.pos.y, shulkerStash.pos.z)));
@@ -121,8 +105,7 @@ app.post('/order', async (req, res) => {
         sCont.close();
         await wait(600);
 
-        // 2. PRECISION BULK GATHERING
-        botStatus = `Withdrawing: 0/${targetQty}`;
+        // 2. PRECISION GATHERING
         let gathered = 0;
         for (const stash of db) {
             if (gathered >= targetQty) break;
@@ -130,13 +113,12 @@ app.post('/order', async (req, res) => {
             if (match) {
                 await bot.pathfinder.goto(new goals.GoalGetToBlock(stash.pos.x, stash.pos.y, stash.pos.z));
                 const c = await bot.openContainer(bot.blockAt(new Vec3(stash.pos.x, stash.pos.y, stash.pos.z)));
-                const available = c.containerItems().filter(i => i.name === itemName);
-                for (const stack of available) {
+                const stacks = c.containerItems().filter(i => i.name === itemName);
+                for (const stack of stacks) {
                     if (gathered >= targetQty) break;
                     const take = Math.min(targetQty - gathered, stack.count);
                     await c.withdraw(stack.type, null, take);
                     gathered += take;
-                    botStatus = `Withdrawing: ${gathered}/${targetQty}`;
                     await wait(300);
                 }
                 c.close();
@@ -144,14 +126,12 @@ app.post('/order', async (req, res) => {
             }
         }
 
-        // 3. SMART PACK & IRONCLAD VACUUM
+        // 3. SMART PACK & ACTIVE VACUUM
         botStatus = "Packing Assets...";
         const space = await findSmartSpace();
         await bot.equip(bot.inventory.items().find(i => i.name.includes('shulker_box')), 'hand');
-        await wait(500);
-        await bot.placeBlock(bot.blockAt(space.ground.position), new Vec3(0, 1, 0));
+        await bot.placeBlock(space.ground, new Vec3(0, 1, 0));
         await wait(1500);
-
         const packBox = await bot.openContainer(bot.blockAt(space.box));
         for (const i of bot.inventory.items().filter(i => i.name === itemName)) {
             await packBox.deposit(i.type, null, i.count);
@@ -160,23 +140,30 @@ app.post('/order', async (req, res) => {
         packBox.close();
         await wait(1000);
 
-        // --- THE VACUUM FIX ---
-        botStatus = "Confirming Vacuum Pickup...";
+        // --- THE ACTIVE VACUUM FIX ---
+        botStatus = "Hunting Dropped Shulker...";
         await bot.dig(bot.blockAt(space.box));
         
-        let shulkerInBag = false;
-        for (let i = 0; i < 10; i++) {
-            await bot.pathfinder.goto(new goals.GoalGetToBlock(space.box.x, space.box.y, space.box.z));
-            await wait(1000);
+        let collected = false;
+        for (let i = 0; i < 15; i++) { // 15-second hunt window
+            const droppedItem = bot.nearestEntity(e => e.type === 'item');
+            if (droppedItem) {
+                // Walk directly to the entity on the ground
+                await bot.pathfinder.goto(new goals.GoalFollow(droppedItem, 0));
+            } else {
+                // If no item seen, stay on last block
+                await bot.pathfinder.goto(new goals.GoalGetToBlock(space.box.x, space.box.y, space.box.z));
+            }
+            await wait(800);
+            // Verify by inventory
             if (bot.inventory.items().some(item => item.name.includes('shulker_box') && item.nbt)) {
-                shulkerInBag = true;
-                break;
+                collected = true; break;
             }
         }
-        if (!shulkerInBag) throw new Error("Vacuum Pickup Failed.");
+        if (!collected) throw new Error("Vacuum Radar Failure");
 
-        // 4. SMART XZ DELIVERY
-        botStatus = "En Route to Location...";
+        // 4. SMART DELIVERY
+        botStatus = "Navigating...";
         const tx = Number(x); const tz = Number(z);
         await bot.pathfinder.goto(new goals.GoalNear(tx, 100, tz, 40)); 
         const ty = bot.world.getHighestBlockAt(new Vec3(tx, 0, tz))?.position.y || 64;
@@ -185,7 +172,7 @@ app.post('/order', async (req, res) => {
         const player = bot.nearestEntity(e => e.type === 'player' && e.username !== bot.username);
         if (player) await bot.pathfinder.goto(new goals.GoalFollow(player, 0));
 
-        bot.chat('◈ AI: Destination Reached. Sacrifice Active.');
+        bot.chat('◈ AI: Arrival. Sacrificing.');
         await wait(1000);
         bot.chat('/kill');
 
@@ -196,8 +183,7 @@ app.post('/order', async (req, res) => {
             s.items = s.items.map(it => {
                 if (it.name === itemName && rem > 0) {
                     const take = Math.min(it.count, rem);
-                    it.count -= take;
-                    rem -= take;
+                    it.count -= take; rem -= take;
                 }
                 return it;
             }).filter(it => it.count > 0);
@@ -205,10 +191,10 @@ app.post('/order', async (req, res) => {
         });
         saveDB(currentDB);
 
-    } catch (e) { botStatus = "Ready at Warehouse"; bot.chat(`◈ AI ERROR: ${e.message}`); }
+    } catch (e) { botStatus = "Ready"; bot.chat(`◈ AI ERROR: ${e.message}`); }
 });
 
-// --- PLATINUM PORCELAIN UI ---
+// --- UI (Porcelain & Sand) ---
 app.get('/status', (req, res) => res.json({ status: botStatus }));
 app.get('/stashes', (req, res) => {
     const db = getDB();
@@ -226,23 +212,20 @@ app.get('/', (req, res) => {
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         :root { --bg: #FDFCF8; --white: #FFFFFF; --cream: #F5F1E9; --accent: #D4A373; --text: #4A4A4A; }
-        body { background: var(--bg); color: var(--text); font-family: -apple-system, system-ui, sans-serif; margin: 0; padding: 25px; }
-        .nav { display: flex; justify-content: space-between; align-items: center; margin-bottom: 50px; }
+        body { background: var(--bg); color: var(--text); font-family: -apple-system, sans-serif; margin: 0; padding: 25px; }
+        .nav { display: flex; justify-content: space-between; align-items: center; margin-bottom: 40px; border-bottom: 1px solid var(--cream); padding-bottom: 20px; }
         .status-pill { background: var(--white); padding: 12px 25px; border-radius: 50px; font-size: 0.85em; font-weight: 700; color: var(--accent); box-shadow: 0 4px 15px rgba(0,0,0,0.04); }
         .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(175px, 1fr)); gap: 20px; }
         .card { background: var(--white); border-radius: 20px; padding: 35px 20px; text-align: center; box-shadow: 0 5px 15px rgba(0,0,0,0.03); transition: 0.3s; cursor: pointer; border: 1px solid transparent; }
         .card:hover { transform: translateY(-5px); border-color: var(--accent); }
         .card.active { border-color: var(--accent); background: var(--cream); }
-        .player-row { padding: 20px; background: var(--white); border-radius: 15px; margin-bottom: 12px; display: flex; justify-content: space-between; cursor: pointer; box-shadow: 0 4px 12px rgba(0,0,0,0.03); border: 1px solid transparent; }
-        .player-row.active { border-color: var(--accent); background: var(--cream); color: var(--accent); font-weight: bold; }
         .checkout { position: sticky; bottom: 25px; background: var(--white); border-radius: 25px; padding: 25px; display: flex; gap: 15px; box-shadow: 0 -10px 40px rgba(0,0,0,0.06); margin-top: 50px; border: 1px solid var(--cream); }
-        input { flex: 1; border: 1px solid var(--cream); padding: 15px; border-radius: 12px; background: var(--bg); outline: none; font-weight: 600; color: var(--text); }
-        button { background: var(--accent); color: white; border: none; padding: 15px 45px; border-radius: 12px; font-weight: 800; cursor: pointer; text-transform: uppercase; letter-spacing: 1.5px; }
+        input { flex: 1; border: 1px solid var(--cream); padding: 15px; border-radius: 12px; background: var(--bg); outline: none; font-weight: 600; }
+        button { background: var(--accent); color: white; border: none; padding: 15px 45px; border-radius: 12px; font-weight: 800; cursor: pointer; }
     </style></head><body>
         <div class="nav"><h2>CUB LOGISTICS</h2> <div class="status-pill">● <span id="st">Ready</span></div></div>
         <div class="grid" id="it"></div>
-        <h4 style="margin: 40px 0 15px 0; color: #AAA; font-size: 0.75em; text-transform: uppercase;">Active Clients</h4>
-        <div id="pl"></div>
+        <div id="pl" style="margin-top: 30px;"></div>
         <div class="checkout">
             <input type="number" id="q" value="64">
             <input type="text" id="c" placeholder="X Z">
@@ -257,13 +240,12 @@ app.get('/', (req, res) => {
                 document.getElementById('st').innerText = status.status;
                 document.getElementById('it').innerHTML = Object.entries(items).map(([n,c]) => \`
                     <div class="card \${si==n?'active':''}" onclick="si='\${n}';sync()">
-                        <div style="font-size: 0.7em; color: var(--accent); font-weight: 800; letter-spacing: 1px;">STOCK</div>
-                        <div style="font-weight: 700; font-size: 1.2em; margin: 15px 0;">\${n.replace(/_/g,' ').toUpperCase()}</div>
-                        <div style="color: #999; font-size: 0.9em;">\${c} Units Available</div>
+                        <div style="font-weight: 700; font-size: 1.1em; margin: 10px 0;">\${n.replace(/_/g,' ').toUpperCase()}</div>
+                        <div style="color: #999; font-size: 0.85em;">\${c} Units Available</div>
                     </div>\`).join('');
                 document.getElementById('pl').innerHTML = players.map(p => \`
-                    <div class="player-row \${sp?.u==p.u?'active':''}" onclick="sp={u:'\${p.u}',x:\${p.x},z:\${p.z}};sync()">
-                        <span>👤 \${p.u}</span> <span>X: \${p.x} Z: \${p.z}</span>
+                    <div onclick="sp={u:'\${p.u}',x:\${p.x},z:\${p.z}}" style="padding:15px; background:white; margin-bottom:10px; border-radius:15px; cursor:pointer; display:flex; justify-content:space-between; box-shadow:0 4px 10px rgba(0,0,0,0.02); border: 1px solid transparent;">
+                        <span>👤 \${p.u}</span> <span>\${p.x} / \${p.z}</span>
                     </div>\`).join('');
             }
             function order(){
@@ -271,7 +253,6 @@ app.get('/', (req, res) => {
                 const c = document.getElementById('c').value.split(' ');
                 let p = sp ? {x:sp.x, z:sp.z} : {x:c[0]||0, z:c[1]||0};
                 fetch('/order',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({itemName:si,count:q,x:p.x,z:p.z})});
-                alert("AI: Order Dispatched Successfully.");
             }
             setInterval(sync, 2000); sync();
         </script></body></html>`);
@@ -279,5 +260,3 @@ app.get('/', (req, res) => {
 
 app.listen(10000);
 createBot();
-         
-
